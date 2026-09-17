@@ -17,6 +17,29 @@ namespace Ssx\Wiretap\Cli;
 final readonly class Input
 {
     /**
+     * Options that take a value, so `--key value` can be told apart from a
+     * flag followed by a positional argument.
+     *
+     * Guessing from the shape of the next token is not good enough: `wiretap
+     * show --json 1` parsed `json` as "1" and left no positional behind, so
+     * the command answered "Which one?" for a request that named the record
+     * perfectly clearly. Anything not listed here is a flag.
+     */
+    private const TAKES_VALUE = [
+        'correlation',
+        'host',
+        'limit',
+        'method',
+        'offset',
+        'older-than',
+        'out',
+        'path',
+        'since',
+        'status',
+        'until',
+    ];
+
+    /**
      * @param list<string>          $arguments
      * @param array<string, string|bool> $options
      */
@@ -48,11 +71,14 @@ final readonly class Input
                     continue;
                 }
 
-                // `--key value`, but only when the next token is not itself an
-                // option — otherwise `--follow --host x` would swallow --host.
+                // `--key value`, for the options that take one. The next
+                // token still has to not be an option itself, so a missing
+                // value does not swallow the following switch.
                 $next = $argv[$i + 1] ?? null;
 
-                if ($next !== null && !str_starts_with($next, '-')) {
+                if (in_array($name, self::TAKES_VALUE, true)
+                    && $next !== null
+                    && !str_starts_with($next, '-')) {
                     $options[$name] = $next;
                     ++$i;
 
