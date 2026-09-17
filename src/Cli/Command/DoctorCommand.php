@@ -6,6 +6,7 @@ namespace Ssx\Wiretap\Cli\Command;
 
 use Ssx\Wiretap\Cli\Input;
 use Ssx\Wiretap\Query\ExchangeQuery;
+use Ssx\Wiretap\Wiretap;
 
 /**
  * Answers "why is nothing being recorded", which otherwise costs an afternoon.
@@ -74,6 +75,8 @@ final class DoctorCommand extends AbstractCommand
         $enabled = filter_var(getenv('WIRETAP_ENABLED') ?: 'false', FILTER_VALIDATE_BOOL);
         $this->row('WIRETAP_ENABLED', $enabled ? 'true' : 'false', true);
 
+        $problems += $this->reportSafetyControls();
+
         $o->line();
         $o->line($o->bold('Recorded traffic'));
 
@@ -120,6 +123,91 @@ final class DoctorCommand extends AbstractCommand
         $o->line();
 
         return 0;
+    }
+
+    /**
+     * Report the state of the blocklist and the redactor.
+     *
+     * These are the two controls the README tells people to rely on for PCI
+     * and GDPR exposure, and until now nothing printed them. A rule that
+     * failed to compile, a provider that threw and silently blocked
+     * everything, or a custom regex that never ran were all invisible — the
+     * operator's only evidence was traffic that did or did not appear, which
+     * is exactly the signal a working blocklist also produces.
+     *
+     * In a plain CLI process this resolves the recorder from the environment,
+     * so it answers "is WIRETAP_BLOCK being parsed the way I think". Invoked
+     * through a framework bridge, the application's own recorder is already
+     * registered and this reports that instead.
+     */
+    private function reportSafetyControls(): int
+    {
+        $o = $this->output;
+        $problems = 0;
+
+        $o->line();
+        $o->line($o->bold('Safety controls'));
+
+        try {
+            $recorder = Wiretap::recorder();
+        } catch (\Throwable $e) {
+            $this->row('recorder', 'could not be resolved: ' . $e->getMessage(), false);
+
+            return 1;
+        }
+
+        $blocklist = $recorder->blocklist();
+        $sources = $blocklist->sources();
+        $patterns = count($blocklist->patterns());
+
+        $this->row('blocklist rules', (string) $patterns, true);
+
+        foreach ($sources as $name => $count) {
+            $o->line($count === -1
+                ? sprintf('    %-42s %s', $name, $o->yellow('failed to read'))
+                : $o->dim(sprintf('    %-42s %d', $name, $count)));
+        }
+
+        if ($blocklist->hasFailedClosed()) {
+            ++$problems;
+            $this->row('blocklist state', 'failed closed — all traffic blocked', false);
+            $o->line($o->dim('    A provider threw while compiling. Nothing is being captured'));
+            $o->line($o->dim('    until it is fixed; that is deliberate, but it is not normal.'));
+        }
+
+        foreach ($blocklist->errors() as $error) {
+            ++$problems;
+            $o->line('  ' . $o->yellow('!') . ' ' . $o->dim($error));
+        }
+
+        $blocked = $blocklist->blockCounts();
+
+        if ($blocked !== []) {
+            arsort($blocked);
+            $o->line($o->dim('    Blocked this process'));
+
+            foreach (array_slice($blocked, 0, 8, true) as $host => $count) {
+                $o->line(sprintf('      %-40s %d', $host, $count));
+            }
+        }
+
+        $redactor = $recorder->redactor();
+        $invalid = $redactor->invalidPatterns();
+
+        $this->row('redaction', $invalid === [] ? 'on' : 'on, with broken rules', $invalid === []);
+
+        foreach ($invalid as $pattern) {
+            ++$problems;
+            $o->line('  ' . $o->yellow('!') . ' ' . $o->dim(sprintf('custom pattern never runs: %s', $pattern)));
+        }
+
+        if ($patterns === 0) {
+            $o->line($o->dim('    No blocklist rules are configured. Redaction alone does not keep'));
+            $o->line($o->dim('    cardholder data out of the capture — a blocked URL is never read,'));
+            $o->line($o->dim('    a redacted one passed through this process in plaintext first.'));
+        }
+
+        return $problems;
     }
 
     /**

@@ -151,7 +151,21 @@ viewers display in their detail panes.
 
 Answers "why is nothing being recorded", which otherwise costs an afternoon:
 PHP version, extension state, log directory, whether `WIRETAP_ENABLED` is set,
-recent traffic by host, and blocklist pattern counts per source.
+and recent traffic by host.
+
+It also reports the state of the two safety controls, which is the only way to
+find out that one of them is not doing what you think:
+
+- how many blocklist rules are loaded, and which source each came from
+- any rule that failed to compile, quoted, with the reason
+- whether a provider threw and the blocklist has failed closed, blocking
+  everything
+- what has been blocked so far in this process, by host
+- any custom redaction pattern that is invalid and therefore never runs
+
+A blocklist rule that silently did not compile is the worst outcome available
+here: the only evidence is traffic showing up that you believed was blocked,
+and that looks identical to a blocklist that is working.
 
 It also warns when capture has been left on for more than 24 hours. A tool
 documented as temporary but behaving identically on day ninety will be left on;
