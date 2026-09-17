@@ -54,6 +54,23 @@ responsibility, not the package's.** We do not know which of your endpoints
 carry cardholder data or which keys in your payloads hold personal data. You
 do.
 
+### Where captures are written
+
+By default wiretap writes NDJSON into a per-user directory under the system
+temp directory — `/tmp/wiretap-1000` for uid 1000, not a shared `/tmp/wiretap`.
+The directory is created `0700` and files `0600`, and the sink refuses to
+write into a directory owned by another user or through a symlink.
+
+This matters because the default temp directory is world-writable on most
+Linux hosts. A single shared path is claimed by whichever account creates it
+first, so on a multi-tenant or shared-hosting box another local user could
+have owned the directory your captures went into — and captures contain
+Authorization headers, session cookies and request bodies.
+
+Set `WIRETAP_PATH` to put them somewhere else. Whatever you choose, it is
+still a directory full of credentials: keep it off shared volumes, out of the
+document root, and out of your backups.
+
 If you need permanent visibility into outbound traffic, you want metrics and
 traces, not payload capture. Use OpenTelemetry directly.
 

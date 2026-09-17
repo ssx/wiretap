@@ -157,20 +157,42 @@ describe('body redaction', function (): void {
     });
 
     it('drops the whole body when the safety net still finds a secret', function (): void {
-        // Structured rules miss it because the key is unexpected, and the
-        // JWT detector is switched off, so only the net catches it.
+        // The detector is enabled but cannot see the token in the serialised
+        // text, because the first character is written as a \u escape. Only
+        // the decoded scan finds it, and it can only drop the whole body —
+        // it has no offsets to redact in the original bytes. That is the
+        // net's remaining job.
+        $redactor = new Redactor(new RedactionConfig(
+            patterns: ['pan' => false, 'bearer' => false, 'jwt' => true],
+            safetyNet: true,
+        ));
+
+        $result = $redactor->redactBody(CapturedBody::captured(
+            '{"surprise":"\u0065yJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc"}',
+            contentType: 'application/json',
+        ));
+
+        expect($result->isPresent())->toBeFalse()
+            ->and($result->omittedReason)->toBe(CapturedBody::OMITTED_REDACTED);
+    });
+
+    it('does not drop a body for a detector the operator turned off', function (): void {
+        // Disabling a detector used to make things worse rather than better:
+        // the net scanned the built-in set regardless, so `jwt => false` did
+        // not keep JWTs, it threw away every body that contained one. There
+        // was no value of this setting anybody could want.
         $redactor = new Redactor(new RedactionConfig(
             patterns: ['pan' => false, 'bearer' => false, 'jwt' => false],
             safetyNet: true,
         ));
 
         $result = $redactor->redactBody(CapturedBody::captured(
-            json_encode(['surprise' => 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc']),
+            '{"surprise":"\u0065yJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc"}',
             contentType: 'application/json',
         ));
 
-        expect($result->isPresent())->toBeFalse()
-            ->and($result->omittedReason)->toBe(CapturedBody::OMITTED_REDACTED);
+        expect($result->isPresent())->toBeTrue()
+            ->and($result->bytes)->toContain('yJhbGciOiJIUzI1NiJ9');
     });
 
     it('redacts before truncating, so a PAN cannot be split across the boundary', function (): void {

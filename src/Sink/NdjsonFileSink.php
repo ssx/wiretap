@@ -24,7 +24,11 @@ final class NdjsonFileSink implements ExchangeSink
     public function __construct(
         private readonly string $directory,
         private readonly string $prefix = 'wiretap',
-        private readonly int $filePermissions = 0o640,
+        // Owner only. A capture file holds Authorization headers, session
+        // cookies and request bodies; group-readable is a wider audience than
+        // anything in here warrants by default. Callers who genuinely share a
+        // log group can widen it explicitly.
+        private readonly int $filePermissions = 0o600,
     ) {
     }
 
@@ -54,6 +58,25 @@ final class NdjsonFileSink implements ExchangeSink
         $this->append($lines);
     }
 
+    /**
+     * Whether the log directory belongs to the user this process runs as.
+     *
+     * A directory someone else owns is one they can read, and on a shared
+     * host that is the whole exposure: captures contain credentials and
+     * personal data by design. Refusing to write is the correct outcome —
+     * losing a debug record costs nothing next to publishing one.
+     */
+    private function directoryIsOurs(): bool
+    {
+        if (!function_exists('posix_geteuid')) {
+            return true;
+        }
+
+        $owner = @fileowner($this->directory);
+
+        return $owner === false || $owner === posix_geteuid();
+    }
+
     private function append(string $lines): void
     {
         // The `@` operator is not enough on its own: PHPUnit and several
@@ -65,17 +88,43 @@ final class NdjsonFileSink implements ExchangeSink
         set_error_handler(static fn (): bool => true);
 
         try {
-            if (!is_dir($this->directory) && !@mkdir($this->directory, 0o750, true) && !is_dir($this->directory)) {
+            if (!is_dir($this->directory)) {
+                if (!@mkdir($this->directory, 0o700, true) && !is_dir($this->directory)) {
+                    return;
+                }
+
+                // mkdir's mode is masked by umask, so set it explicitly.
+                @chmod($this->directory, 0o700);
+            }
+
+            if (!$this->directoryIsOurs()) {
                 return;
             }
 
             $path = $this->currentFile();
+
+            // Never follow a symlink here. Appending through one hands an
+            // attacker who can create names in this directory an arbitrary
+            // file append as this user.
+            if (is_link($path)) {
+                return;
+            }
+
             $new = !file_exists($path);
 
             $handle = @fopen($path, 'ab');
 
             if ($handle === false) {
                 return;
+            }
+
+            // Tighten permissions before the first record is written, not
+            // after. Creation applies the process umask, which is commonly
+            // 0022 — so a file created here was world-readable for the whole
+            // write, and anything appended in that window stayed readable to
+            // every account on the host until the next record arrived.
+            if ($new) {
+                @chmod($path, $this->filePermissions);
             }
 
             try {
@@ -97,9 +146,6 @@ final class NdjsonFileSink implements ExchangeSink
                 fclose($handle);
             }
 
-            if ($new) {
-                @chmod($path, $this->filePermissions);
-            }
         } catch (\Throwable) {
             // See MultiSink: never propagate into the application.
         } finally {
