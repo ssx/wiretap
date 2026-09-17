@@ -114,8 +114,8 @@ final readonly class Redactor
 
         if (is_array($parts)) {
             foreach (['host', 'path', 'scheme'] as $part) {
-                if (isset($parts[$part]) && is_string($parts[$part])) {
-                    $known->protect($parts[$part]);
+                if (isset($parts[$part])) {
+                    $known->protect((string) $parts[$part]);
                 }
             }
         }
