@@ -121,7 +121,13 @@ final readonly class Pattern
     public function matches(string $url): bool
     {
         if ($this->regex !== null) {
-            return preg_match($this->regex, $url) === 1;
+            $result = preg_match($this->regex, $url);
+
+            // preg_match returns false on a runtime failure — invalid UTF-8 in
+            // the subject, or a backtrack limit. Treating that as "not
+            // blocked" would let exactly the traffic a rule exists to stop
+            // through, so an execution failure blocks.
+            return $result === false || $result === 1;
         }
 
         $parts = parse_url($url);

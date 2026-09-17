@@ -113,6 +113,7 @@ final readonly class RedactionConfig
         public int $maxBodyBytes = 65536,
         public int $maxHeaderValueBytes = 4096,
         public int $minEchoedSecretLength = 8,
+        public bool $omitUninspectableBodies = true,
     ) {
     }
 
@@ -153,6 +154,7 @@ final readonly class RedactionConfig
             maxBodyBytes: $this->maxBodyBytes,
             maxHeaderValueBytes: $this->maxHeaderValueBytes,
             minEchoedSecretLength: $this->minEchoedSecretLength,
+            omitUninspectableBodies: $this->omitUninspectableBodies,
         );
     }
 }

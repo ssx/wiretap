@@ -277,13 +277,32 @@ final class Wiretap
                 new EnvBlocklistProvider(),
             ]),
             redactor: new Redactor(new RedactionConfig(
-                maxBodyBytes: (int) (getenv('WIRETAP_BODY_LIMIT') ?: 65536),
+                maxBodyBytes: self::intFromEnv('WIRETAP_BODY_LIMIT', 65536),
             )),
             sampler: new Sampler(
-                rateBasisPoints: (int) (getenv('WIRETAP_SAMPLE_BP') ?: 10000),
+                rateBasisPoints: self::intFromEnv('WIRETAP_SAMPLE_BP', 10000),
             ),
             enabled: $enabled,
         );
+    }
+
+    /**
+     * Read an integer from the environment.
+     *
+     * `?:` cannot be used here: PHP treats the string "0" as falsy, so
+     * WIRETAP_SAMPLE_BP=0 — meaning "sample nothing" — silently became the
+     * 10000 default and kept everything. The same applied to a zero body
+     * limit.
+     */
+    private static function intFromEnv(string $name, int $default): int
+    {
+        $value = getenv($name);
+
+        if (!is_string($value) || trim($value) === '' || !is_numeric(trim($value))) {
+            return $default;
+        }
+
+        return max(0, (int) trim($value));
     }
 
     private static function defaultSink(): ExchangeSink

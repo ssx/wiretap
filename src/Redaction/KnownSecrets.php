@@ -77,13 +77,39 @@ final class KnownSecrets
         }
     }
 
+    /**
+     * Remember each cookie's value separately.
+     *
+     * `Cookie: session=abc; theme=dark` is remembered whole, so a response
+     * echoing just `abc` was not recognised. Individual values are what get
+     * echoed back.
+     */
+    public function rememberCookieValues(string $headerValue): void
+    {
+        foreach (explode(';', $headerValue) as $pair) {
+            $parts = explode('=', trim($pair), 2);
+
+            if (count($parts) === 2) {
+                $this->remember(trim($parts[1], " \t\"'"));
+            }
+        }
+    }
+
     public function scrub(string $subject, string $replacement): string
     {
         if ($this->values === [] || $subject === '') {
             return $subject;
         }
 
-        return str_replace(array_keys($this->values), $replacement, $subject);
+        $values = array_keys($this->values);
+
+        // Longest first. str_replace applies its search list in order, so a
+        // shorter secret that is a prefix of a longer one would otherwise
+        // replace the prefix and leave the remainder of the longer secret in
+        // place — turning `abcdefghSECRETTAIL` into `[REDACTED]SECRETTAIL`.
+        usort($values, static fn (string $a, string $b): int => strlen($b) <=> strlen($a));
+
+        return str_replace($values, $replacement, $subject);
     }
 
     public function isEmpty(): bool
