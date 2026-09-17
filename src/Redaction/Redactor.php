@@ -75,6 +75,29 @@ final readonly class Redactor
     }
 
     /**
+     * What may be kept of a digest of now-redacted content.
+     *
+     * Nothing, unless a salt is configured — in which case an HMAC preserves
+     * the one property the digest was for, telling whether two exchanges
+     * carried the same payload, without being reversible by anyone who does
+     * not hold the salt.
+     */
+    private function digestFor(?string $sha256): ?string
+    {
+        if ($sha256 === null) {
+            return null;
+        }
+
+        $salt = $this->config->hashSalt;
+
+        if (!is_string($salt) || $salt === '') {
+            return null;
+        }
+
+        return hash_hmac('sha256', $sha256, $salt);
+    }
+
+    /**
      * Collect every secret in the exchange before any of it is rewritten.
      *
      * Sweeping as we went left three holes: a value removed from the request
@@ -508,7 +531,7 @@ final readonly class Redactor
                 CapturedBody::OMITTED_REDACTED,
                 $body->size,
                 $body->contentType,
-                $body->sha256,
+                $this->digestFor($body->sha256),
             );
         }
 
@@ -517,7 +540,7 @@ final readonly class Redactor
                 CapturedBody::OMITTED_REDACTED,
                 $body->size,
                 $body->contentType,
-                $body->sha256,
+                $this->digestFor($body->sha256),
             );
         }
 
@@ -530,7 +553,7 @@ final readonly class Redactor
                 CapturedBody::OMITTED_REDACTED,
                 $body->size,
                 $body->contentType,
-                $body->sha256,
+                $this->digestFor($body->sha256),
             );
         }
 
@@ -546,7 +569,7 @@ final readonly class Redactor
                 CapturedBody::OMITTED_REDACTED,
                 $body->size,
                 $body->contentType,
-                $body->sha256,
+                $this->digestFor($body->sha256),
             );
         }
 
@@ -558,7 +581,17 @@ final readonly class Redactor
             $truncated = true;
         }
 
-        return $body->withBytes($bytes, $truncated);
+        $result = $body->withBytes($bytes, $truncated);
+
+        // If redaction changed anything, the digest describes bytes that are
+        // no longer stored — and a SHA-256 of a low-entropy payload beside its
+        // own redaction is an oracle, not metadata. `{"pin":"4821"}` was
+        // recovered from it by brute force in three milliseconds.
+        if ($bytes !== (string) $body->bytes) {
+            $result = $result->withDigest($this->digestFor($body->sha256));
+        }
+
+        return $result;
     }
 
     /**
