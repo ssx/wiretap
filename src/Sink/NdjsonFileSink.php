@@ -80,8 +80,17 @@ final class NdjsonFileSink implements ExchangeSink
 
             try {
                 if (flock($handle, LOCK_EX)) {
-                    $this->writeAll($handle, $lines);
-                    fflush($handle);
+                    // Seek to the real end *after* taking the lock. ftell() on
+                    // a handle opened before the lock can sit behind EOF if
+                    // another writer appended in between — and the rollback
+                    // would then truncate away that writer's committed
+                    // records. A crash-safety measure that deletes other
+                    // processes' data is worse than the problem it solves.
+                    if (fseek($handle, 0, SEEK_END) === 0) {
+                        $this->writeAll($handle, $lines);
+                        fflush($handle);
+                    }
+
                     flock($handle, LOCK_UN);
                 }
             } finally {

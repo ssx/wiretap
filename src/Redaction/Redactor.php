@@ -48,8 +48,14 @@ final readonly class Redactor
         // where no structural rule is looking for it.
         $known = new KnownSecrets($this->config->minEchoedSecretLength);
 
+        // Pass one: learn. Every secret the exchange contains is collected
+        // before anything is swept, because a value removed from the request
+        // can be echoed in a response that was already processed — and a
+        // sensitive header can appear after the body that echoes it.
+        $this->learn($exchange, $known);
+
         $redacted = $exchange
-            ->withUri($this->redactUrl($exchange->uri, $known))
+            ->withUri($this->redactUriDetectors($this->redactUrl($exchange->uri, $known), $known))
             ->withRequestHeaders($this->redactHeaders($exchange->requestHeaders, $known))
             ->withResponseHeaders($this->redactHeaders($exchange->responseHeaders, $known))
             ->withRequestBody($this->redactBody($exchange->requestBody, $known))
@@ -66,6 +72,99 @@ final readonly class Redactor
             // controlled, and tags are supplied by integrations.
             ->withReason($redacted->reason === null ? null : $this->redactText($redacted->reason, $known))
             ->withTags(array_map(fn (string $t): string => $this->redactText($t, $known), $redacted->tags));
+    }
+
+    /**
+     * Collect every secret in the exchange before any of it is rewritten.
+     *
+     * Sweeping as we went left three holes: a value removed from the request
+     * URI was not known while the response headers were being processed, a
+     * sensitive header appearing after a body could not protect that body, and
+     * a value removed by a body-path rule was never registered at all — so the
+     * same string echoed elsewhere survived.
+     */
+    private function learn(Exchange $exchange, KnownSecrets $known): void
+    {
+        // Query parameters and userinfo.
+        $this->redactUrl($exchange->uri, $known);
+
+        foreach ([$exchange->requestHeaders, $exchange->responseHeaders] as $headers) {
+            foreach ($headers as [$name, $value]) {
+                if ($this->isSensitiveHeader($name)) {
+                    $known->remember($value);
+                    $known->rememberCredentialValue($value);
+                    $known->rememberCookieValues($value);
+                }
+
+                if ($this->isUrlHeader($name)) {
+                    $this->redactUrl($value, $known);
+                }
+            }
+        }
+
+        // Values a body-path rule will remove are secrets wherever else they
+        // appear, including in the other body.
+        foreach ([$exchange->requestBody, $exchange->responseBody] as $body) {
+            $this->learnBodyPaths($body, $known);
+        }
+    }
+
+    private function learnBodyPaths(CapturedBody $body, KnownSecrets $known): void
+    {
+        if ($this->config->bodyPaths === [] || !$body->isPresent()) {
+            return;
+        }
+
+        $decoded = json_decode((string) $body->bytes, true);
+
+        if (!is_array($decoded)) {
+            return;
+        }
+
+        foreach ($this->config->bodyPaths as $path) {
+            $this->collectPath($decoded, explode('.', $path), $known);
+        }
+    }
+
+    /**
+     * @param array<array-key, mixed> $data
+     * @param list<string>            $segments
+     */
+    private function collectPath(array $data, array $segments, KnownSecrets $known): void
+    {
+        if ($segments === []) {
+            return;
+        }
+
+        $segment = array_shift($segments);
+        $keys = $segment === '*' ? array_keys($data) : [$segment];
+
+        foreach ($keys as $key) {
+            if (!array_key_exists($key, $data)) {
+                continue;
+            }
+
+            $value = $data[$key];
+
+            if ($segments === []) {
+                // Everything beneath a removed key is equally secret.
+                if (is_array($value)) {
+                    array_walk_recursive($value, static function (mixed $leaf) use ($known): void {
+                        if (is_scalar($leaf)) {
+                            $known->remember((string) $leaf);
+                        }
+                    });
+                } elseif (is_scalar($value)) {
+                    $known->remember((string) $value);
+                }
+
+                continue;
+            }
+
+            if (is_array($value)) {
+                $this->collectPath($value, $segments, $known);
+            }
+        }
     }
 
     /**
@@ -102,6 +201,19 @@ final readonly class Redactor
         }
 
         return $this->rebuildUrl($parts, $query);
+    }
+
+    /**
+     * The URI is persisted like any other field, so the detectors have to run
+     * over it. redactUrl() only removes *named* parameters and userinfo, so a
+     * card number in an unnamed parameter — or a token in a path segment — was
+     * stored in full with PAN detection switched on.
+     */
+    private function redactUriDetectors(string $uri, KnownSecrets $known): string
+    {
+        $clean = $this->applyPatterns($uri);
+
+        return $known->scrub($clean, $this->config->replacement);
     }
 
     /**
@@ -222,6 +334,10 @@ final readonly class Redactor
             }
 
             $value = $this->applyPatterns($value);
+
+            if ($known !== null) {
+                $value = $known->scrub($value, $this->config->replacement);
+            }
 
             // Truncation is last. Cutting first destroyed the evidence the
             // detectors need: a header ending in a card number kept its
@@ -366,6 +482,14 @@ final readonly class Redactor
         // Layer 4, then 5, then the echoed-value sweep.
         $structured = $this->redactStructured($bytes, $body->contentType, $inspected);
 
+        // Sweep the decoded values rather than the serialised text. Enumerating
+        // encodings could never be complete: \u006f is a perfectly ordinary
+        // way to write a letter, so a secret echoed as "\u006frdinary-secret"
+        // walked past a literal comparison.
+        if ($known !== null) {
+            $structured = $this->scrubDecoded($structured, $known);
+        }
+
         // The most important rule here. If structural rules are configured and
         // the body could not be parsed to apply them, the body is dropped
         // rather than stored.
@@ -397,7 +521,18 @@ final readonly class Redactor
             );
         }
 
-        $bytes = $this->applyPatterns($structured);
+        $bytes = $this->applyPatterns($structured, $patternsRan);
+
+        // A detector that could not run leaves the body uninspected, which is
+        // the same situation as a structural rule that could not be applied.
+        if ($patternsRan === false && $this->config->omitUninspectableBodies) {
+            return CapturedBody::omitted(
+                CapturedBody::OMITTED_REDACTED,
+                $body->size,
+                $body->contentType,
+                $body->sha256,
+            );
+        }
 
         if ($known !== null) {
             $bytes = $known->scrub($bytes, $this->config->replacement);
@@ -424,6 +559,35 @@ final readonly class Redactor
         }
 
         return $body->withBytes($bytes, $truncated);
+    }
+
+    /**
+     * Scrub known secrets from decoded JSON values, then re-encode.
+     *
+     * Working on the serialised text means matching whichever escape form the
+     * server happened to use. Decoding first makes the comparison exact.
+     */
+    private function scrubDecoded(string $bytes, KnownSecrets $known): string
+    {
+        if ($known->isEmpty()) {
+            return $bytes;
+        }
+
+        $decoded = json_decode($bytes, true);
+
+        if (!is_array($decoded)) {
+            return $bytes;
+        }
+
+        array_walk_recursive($decoded, function (mixed &$value) use ($known): void {
+            if (is_string($value)) {
+                $value = $known->scrub($value, $this->config->replacement);
+            }
+        });
+
+        $encoded = json_encode($decoded, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+        return $encoded === false ? $bytes : $encoded;
     }
 
     /**
@@ -525,20 +689,29 @@ final readonly class Redactor
     /**
      * Layer 5.
      */
-    public function applyPatterns(string $value): string
+    public function applyPatterns(string $value, ?bool &$complete = null): string
     {
+        $complete = true;
+
         foreach (Patterns::all() as $name => $regex) {
             if (($this->config->patterns[$name] ?? false) !== true) {
                 continue;
             }
 
-            $value = $name === 'pan'
-                ? $this->redactPans($value)
-                : (preg_replace_callback(
-                    $regex,
-                    fn (array $m): string => $this->replacementFor($m[0]),
-                    $value,
-                ) ?? $value);
+            if ($name === 'pan') {
+                $value = $this->redactPans($value);
+
+                continue;
+            }
+
+            $value = Regex::replaceCallback(
+                $regex,
+                fn (array $m): string => $this->replacementFor($m[0]),
+                $value,
+                $ran,
+            );
+
+            $complete = $complete && $ran;
         }
 
         foreach ($this->config->custom as $regex) {
@@ -554,7 +727,10 @@ final readonly class Redactor
                 $regex,
                 fn (array $m): string => $this->replacementFor($m[0]),
                 $value,
+                $ran,
             );
+
+            $complete = $complete && $ran;
         }
 
         return $value;
