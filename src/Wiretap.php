@@ -326,12 +326,52 @@ final class Wiretap
 
     private static function defaultSink(): ExchangeSink
     {
+        return new NdjsonFileSink(self::defaultLogPath());
+    }
+
+    /**
+     * Where captures are written when nothing says otherwise.
+     *
+     * Public because the CLI has to resolve the same directory: a reader
+     * looking in one place while the recorder writes to another is a tool
+     * that silently reports no traffic.
+     */
+    public static function defaultLogPath(): string
+    {
         $path = getenv('WIRETAP_PATH');
 
         if (!is_string($path) || $path === '') {
-            $path = sys_get_temp_dir() . '/wiretap';
+            // Per-user, not a shared /tmp/wiretap.
+            //
+            // The default temp directory is world-writable on Linux, so a
+            // single shared name is claimed by whoever creates it first. A
+            // local user who pre-creates it owns the directory and can read
+            // every capture written into it afterwards — full request and
+            // response bodies, Authorization headers, session cookies — from
+            // an unprivileged account. Naming it per-uid means another user's
+            // directory is never the one this process writes to, and the
+            // sink refuses a directory it does not own.
+            $path = sys_get_temp_dir() . '/wiretap-' . self::currentUid();
         }
 
-        return new NdjsonFileSink($path);
+        return $path;
+    }
+
+    /**
+     * An identifier for the user this process is running as.
+     *
+     * ext-posix is not guaranteed, so fall back to the account name. Either
+     * way this only has to be stable and distinct between users on a host;
+     * it is a directory name, not a credential.
+     */
+    private static function currentUid(): string
+    {
+        if (function_exists('posix_geteuid')) {
+            return (string) posix_geteuid();
+        }
+
+        $user = get_current_user();
+
+        return $user === '' ? 'default' : substr(hash('sha256', $user), 0, 12);
     }
 }

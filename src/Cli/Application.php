@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Ssx\Wiretap\Cli;
 
+use Ssx\Wiretap\Wiretap;
+
 use Ssx\Wiretap\Cli\Command\DoctorCommand;
 use Ssx\Wiretap\Cli\Command\ExportCommand;
 use Ssx\Wiretap\Cli\Command\ListCommand;
@@ -58,7 +60,7 @@ final class Application
             return 1;
         }
 
-        $path = $input->option('path') ?? getenv('WIRETAP_PATH') ?: sys_get_temp_dir() . '/wiretap';
+        $path = $input->option('path') ?? Wiretap::defaultLogPath();
         $reader = new NdjsonReader($path);
 
         $class = self::COMMANDS[$command];

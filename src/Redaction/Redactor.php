@@ -695,21 +695,57 @@ final readonly class Redactor
             return $bytes;
         }
 
-        $decoded = json_decode($bytes, true);
+        // assoc = false, so {} stays an object rather than becoming [].
+        $decoded = json_decode($bytes);
 
-        if (!is_array($decoded)) {
+        if (!is_object($decoded) && !is_array($decoded)) {
             return $bytes;
         }
 
-        array_walk_recursive($decoded, function (mixed &$value) use ($known): void {
-            if (is_string($value)) {
-                $value = $known->scrub($value, $this->config->replacement);
+        // A second decode that keeps oversized integer literals as strings.
+        // Walked in lockstep with the first, it is what lets an id beyond
+        // PHP_INT_MAX be told apart from a JSON string that merely looks like
+        // one, so it can be written back out as the integer it was.
+        $wide = json_decode($bytes, false, 512, JSON_BIGINT_AS_STRING);
+
+        $changed = false;
+
+        $decoded = $this->walkJson($decoded, function (string $value) use ($known, &$changed): string {
+            $clean = $known->scrub($value, $this->config->replacement);
+
+            if ($clean !== $value) {
+                $changed = true;
             }
+
+            return $clean;
         });
 
-        $encoded = json_encode($decoded, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        // Untouched bodies are returned byte for byte.
+        //
+        // Re-encoding unconditionally falsified records that had no secrets in
+        // them at all: any exchange carrying an Authorization header made
+        // KnownSecrets non-empty, so every JSON body was decoded and
+        // re-encoded, and {"id":12345678901234567890,"meta":{},"amount":10.0}
+        // came back as {"id":1.2345678901234567e+19,"meta":[],"amount":10}.
+        // Snowflake and Stripe-style ids, empty objects and zero fractions
+        // were quietly rewritten in a tool whose whole claim is that it
+        // records what actually happened.
+        if (!$changed) {
+            return $bytes;
+        }
 
-        return $encoded === false ? $bytes : $encoded;
+        $decoded = $this->markWideIntegers($decoded, $wide);
+
+        $encoded = json_encode(
+            $decoded,
+            JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION,
+        );
+
+        if ($encoded === false) {
+            return $bytes;
+        }
+
+        return $this->unmarkWideIntegers($encoded);
     }
 
     /**
@@ -750,6 +786,109 @@ final readonly class Redactor
         return $changed
             ? http_build_query($fields, '', '&', PHP_QUERY_RFC3986)
             : $bytes;
+    }
+
+    /**
+     * Sentinel wrapped around an integer too large for PHP's int type, so it
+     * survives the round trip through json_encode as a number.
+     */
+    private const WIDE_INT = "\x00wiretap:int\x00";
+
+    /**
+     * Replace every oversized integer with a marked string.
+     *
+     * $plain decoded them as floats; $wide decoded the same document with
+     * JSON_BIGINT_AS_STRING. Where the two disagree in exactly that way, the
+     * source held an integer literal PHP cannot represent, and json_encode
+     * would otherwise write 12345678901234567890 back out as
+     * 1.2345678901234567e+19 — a different id, silently, in a record whose
+     * entire purpose is to say what was actually sent.
+     */
+    private function markWideIntegers(mixed $plain, mixed $wide, int $depth = 0): mixed
+    {
+        if ($depth > 512) {
+            return $plain;
+        }
+
+        if (is_float($plain) && is_string($wide) && preg_match('/^-?\d+$/', $wide) === 1) {
+            return self::WIDE_INT . $wide;
+        }
+
+        if (is_array($plain) && is_array($wide)) {
+            foreach ($plain as $key => $item) {
+                if (array_key_exists($key, $wide)) {
+                    $plain[$key] = $this->markWideIntegers($item, $wide[$key], $depth + 1);
+                }
+            }
+
+            return $plain;
+        }
+
+        if ($plain instanceof \stdClass && $wide instanceof \stdClass) {
+            $other = get_object_vars($wide);
+
+            foreach (get_object_vars($plain) as $key => $item) {
+                if (array_key_exists($key, $other)) {
+                    $plain->{$key} = $this->markWideIntegers($item, $other[$key], $depth + 1);
+                }
+            }
+
+            return $plain;
+        }
+
+        return $plain;
+    }
+
+    /**
+     * Unquote the marked integers json_encode has just written as strings.
+     *
+     * The sentinel contains NUL bytes, which json_encode always escapes as
+     * \u0000, so the pattern below cannot collide with any content that was
+     * genuinely in the body.
+     */
+    private function unmarkWideIntegers(string $encoded): string
+    {
+        if (!str_contains($encoded, '\u0000wiretap:int\u0000')) {
+            return $encoded;
+        }
+
+        return Regex::replaceCallback(
+            '/"\\\\u0000wiretap:int\\\\u0000(-?\d+)"/',
+            static fn (array $m): string => $m[1],
+            $encoded,
+        );
+    }
+
+    /**
+     * Walk every string in a decoded JSON structure, preserving object-ness.
+     *
+     * array_walk_recursive cannot be used: it needs an assoc decode, which
+     * turns every object into an array and loses the distinction between {}
+     * and [].
+     */
+    private function walkJson(mixed $value, callable $visitor): mixed
+    {
+        if (is_string($value)) {
+            return $visitor($value);
+        }
+
+        if (is_array($value)) {
+            foreach ($value as $key => $item) {
+                $value[$key] = $this->walkJson($item, $visitor);
+            }
+
+            return $value;
+        }
+
+        if ($value instanceof \stdClass) {
+            foreach (get_object_vars($value) as $key => $item) {
+                $value->{$key} = $this->walkJson($item, $visitor);
+            }
+
+            return $value;
+        }
+
+        return $value;
     }
 
     /**
@@ -957,13 +1096,26 @@ final readonly class Redactor
 
     private function scanForSecrets(string $value): bool
     {
-        foreach ([Patterns::BEARER, Patterns::JWT, Patterns::AWS_KEY, Patterns::STRIPE_KEY] as $regex) {
+        // Only the detectors this deployment enabled.
+        //
+        // Scanning the built-in set regardless meant disabling a detector made
+        // things worse, not better: an API that legitimately returns a
+        // JWT-shaped value had every one of its bodies dropped entirely,
+        // rather than one field redacted, by the safety net for a rule the
+        // operator had explicitly switched off.
+        foreach (['bearer' => Patterns::BEARER, 'jwt' => Patterns::JWT,
+                  'aws_key' => Patterns::AWS_KEY, 'stripe_key' => Patterns::STRIPE_KEY] as $name => $regex) {
+            if (($this->config->patterns[$name] ?? false) !== true) {
+                continue;
+            }
+
             if (preg_match($regex, $value) === 1) {
                 return true;
             }
         }
 
-        if (preg_match_all(Patterns::PAN, $value, $matches) > 0) {
+        if (($this->config->patterns['pan'] ?? false) === true
+            && preg_match_all(Patterns::PAN, $value, $matches) > 0) {
             foreach ($matches[0] as $candidate) {
                 if (Patterns::findPans($candidate) !== []) {
                     return true;
