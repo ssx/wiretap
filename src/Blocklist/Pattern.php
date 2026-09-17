@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Ssx\Wiretap\Blocklist;
 
+use Ssx\Wiretap\Support\Regex;
+
 /**
  * One compiled blocklist rule.
  *
@@ -62,7 +64,7 @@ final readonly class Pattern
 
         // Validate now rather than at match time, where a failure would be
         // silent and would mean traffic we intended to block gets captured.
-        if (@preg_match($pattern, '') === false) {
+        if (!Regex::isValid($pattern)) {
             throw new \InvalidArgumentException(
                 sprintf('Blocklist pattern "%s" is not a valid regular expression.', $pattern)
             );
