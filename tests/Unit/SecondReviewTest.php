@@ -176,3 +176,55 @@ describe('blocked host counters', function (): void {
         expect(count($blocklist->blockCounts()))->toBeLessThanOrEqual(257);
     });
 });
+
+describe('digests of redacted content', function (): void {
+    it('drops the plaintext digest once redaction has changed the body', function (): void {
+        // A SHA-256 of a low-entropy payload sitting beside its own redaction
+        // is an oracle, not metadata: {"pin":"4821"} was recovered from it by
+        // brute force in three milliseconds.
+        $raw = '{"pin":"4821"}';
+
+        $result = (new Redactor(new RedactionConfig(bodyPaths: ['pin'])))->redactBody(
+            CapturedBody::captured($raw, contentType: 'application/json', sha256: hash('sha256', $raw)),
+        );
+
+        expect($result->bytes)->not->toContain('4821')
+            ->and($result->sha256)->toBeNull();
+    });
+
+    it('keeps a keyed digest when a salt is configured', function (): void {
+        // The digest exists to answer "was this the same payload?". An HMAC
+        // keeps that without being reversible by anyone without the salt.
+        $raw = '{"pin":"4821"}';
+
+        $result = (new Redactor(new RedactionConfig(bodyPaths: ['pin'], hashSalt: 'pepper')))->redactBody(
+            CapturedBody::captured($raw, contentType: 'application/json', sha256: hash('sha256', $raw)),
+        );
+
+        expect($result->sha256)->not->toBeNull()
+            ->and($result->sha256)->not->toBe(hash('sha256', $raw));
+
+        $recovered = false;
+
+        for ($i = 0; $i < 10_000; ++$i) {
+            if (hash('sha256', sprintf('{"pin":"%04d"}', $i)) === $result->sha256) {
+                $recovered = true;
+
+                break;
+            }
+        }
+
+        expect($recovered)->toBeFalse();
+    });
+
+    it('keeps the digest untouched when redaction changed nothing', function (): void {
+        $raw = '{"note":"nothing sensitive here"}';
+        $digest = hash('sha256', $raw);
+
+        $result = (new Redactor(new RedactionConfig(bodyPaths: ['card.cvv'])))->redactBody(
+            CapturedBody::captured($raw, contentType: 'application/json', sha256: $digest),
+        );
+
+        expect($result->sha256)->toBe($digest);
+    });
+});

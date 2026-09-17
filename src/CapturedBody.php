@@ -131,6 +131,24 @@ final readonly class CapturedBody implements \JsonSerializable
     }
 
     /**
+     * Replace the digest, or drop it.
+     *
+     * Used when redaction has changed the body: a digest of the original
+     * plaintext must not be persisted beside the redacted text.
+     */
+    public function withDigest(?string $sha256): self
+    {
+        return new self(
+            bytes: $this->bytes,
+            size: $this->size,
+            sha256: $sha256,
+            contentType: $this->contentType,
+            truncated: $this->truncated,
+            omittedReason: $this->omittedReason,
+        );
+    }
+
+    /**
      * Rebuild from a decoded NDJSON record.
      *
      * @param array<string, mixed> $data
