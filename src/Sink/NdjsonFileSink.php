@@ -80,7 +80,7 @@ final class NdjsonFileSink implements ExchangeSink
 
             try {
                 if (flock($handle, LOCK_EX)) {
-                    fwrite($handle, $lines);
+                    $this->writeAll($handle, $lines);
                     fflush($handle);
                     flock($handle, LOCK_UN);
                 }
@@ -95,6 +95,40 @@ final class NdjsonFileSink implements ExchangeSink
             // See MultiSink: never propagate into the application.
         } finally {
             restore_error_handler();
+        }
+    }
+
+    /**
+     * Write the whole buffer, or leave the file as it was.
+     *
+     * fwrite() may write fewer bytes than asked — a full disk is the usual
+     * cause. Ignoring that left an incomplete JSON line, and the next append
+     * concatenated a record onto it, so one failed write cost two records and
+     * left a line no reader could parse. On failure the file is truncated back
+     * to where this write started, while the lock is still held.
+     *
+     * @param resource $handle
+     */
+    private function writeAll($handle, string $data): void
+    {
+        $start = ftell($handle);
+        $total = strlen($data);
+        $written = 0;
+
+        while ($written < $total) {
+            $result = fwrite($handle, substr($data, $written));
+
+            if ($result === false || $result === 0) {
+                if (is_int($start) && $start >= 0) {
+                    // Discard the partial line rather than leave it for the
+                    // next append to concatenate onto.
+                    ftruncate($handle, $start);
+                }
+
+                return;
+            }
+
+            $written += $result;
         }
     }
 

@@ -75,6 +75,9 @@ final readonly class NdjsonReader implements ExchangeReader
     {
         $index = 1;
 
+        // Every selection field is carried over. Dropping since/until/offset
+        // meant `list --offset=20` followed by `show 1 --offset=20` opened the
+        // first overall result rather than the row that was displayed.
         foreach ($this->query(new ExchangeQuery(
             host: $query->host,
             method: $query->method,
@@ -82,7 +85,10 @@ final readonly class NdjsonReader implements ExchangeReader
             statusClass: $query->statusClass,
             failedOnly: $query->failedOnly,
             correlationId: $query->correlationId,
+            since: $query->since,
+            until: $query->until,
             limit: max($position, 1),
+            offset: $query->offset,
             newestFirst: $query->newestFirst,
         )) as $exchange) {
             if ($index++ === $position) {
@@ -118,42 +124,109 @@ final readonly class NdjsonReader implements ExchangeReader
         }
 
         foreach ($files as $file) {
-            $lines = $this->fileLines($file);
-
-            if ($newestFirst) {
-                $lines = array_reverse($lines);
-            }
-
-            yield from $lines;
+            yield from $newestFirst
+                ? $this->linesBackwards($file)
+                : $this->linesForwards($file);
         }
     }
 
     /**
-     * @return list<string>
+     * @return \Generator<int, string>
      */
-    private function fileLines(string $file): array
+    private function linesForwards(string $file): \Generator
     {
         $handle = @fopen($file, 'rb');
 
         if ($handle === false) {
-            return [];
+            return;
         }
-
-        $lines = [];
 
         try {
             while (($line = fgets($handle)) !== false) {
                 $line = trim($line);
 
                 if ($line !== '') {
-                    $lines[] = $line;
+                    yield $line;
                 }
             }
         } finally {
             fclose($handle);
         }
+    }
 
-        return $lines;
+    /**
+     * Read a file backwards, a chunk at a time.
+     *
+     * The previous implementation built an array of every line in the file and
+     * then reversed it. A day's capture can be larger than available memory, so
+     * even `wiretap list --limit=1` — which needs exactly one record — could
+     * fail on the file it was asked to read from.
+     *
+     * @return \Generator<int, string>
+     */
+    private function linesBackwards(string $file, int $chunkSize = 65536): \Generator
+    {
+        $handle = @fopen($file, 'rb');
+
+        if ($handle === false) {
+            return;
+        }
+
+        try {
+            $position = @filesize($file);
+
+            if (!is_int($position) || $position === 0) {
+                return;
+            }
+
+            // Anything after the last newline, carried between chunks.
+            $remainder = '';
+
+            while ($position > 0) {
+                $read = (int) min($chunkSize, $position);
+
+                if ($read < 1) {
+                    return;
+                }
+
+                $position -= $read;
+
+                if (fseek($handle, $position) !== 0) {
+                    return;
+                }
+
+                $chunk = fread($handle, $read);
+
+                if ($chunk === false) {
+                    return;
+                }
+
+                $buffer = $chunk . $remainder;
+                $lines = explode("\n", $buffer);
+
+                // The first element may be a partial line continued in the
+                // chunk before this one, so it is held back.
+                // explode() always yields at least one element, so the shift
+                // cannot come back empty here.
+                $remainder = (string) array_shift($lines);
+
+                for ($i = count($lines) - 1; $i >= 0; --$i) {
+                    $line = trim($lines[$i]);
+
+                    if ($line !== '') {
+                        yield $line;
+                    }
+                }
+            }
+
+            $remainder = trim($remainder);
+
+            if ($remainder !== '') {
+                yield $remainder;
+            }
+        } finally {
+            fclose($handle);
+        }
     }
 
     private function decode(string $line): ?Exchange

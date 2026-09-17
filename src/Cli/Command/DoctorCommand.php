@@ -29,7 +29,16 @@ final class DoctorCommand extends AbstractCommand
 
         $o->line($o->bold('Environment'));
         $this->row('PHP', PHP_VERSION, version_compare(PHP_VERSION, '8.2', '>='));
-        $this->row('ext-curl', (string) (curl_version()['version'] ?? 'missing'), extension_loaded('curl'));
+        // The core package requires only PHP, so an installation without
+        // ext-curl is supported — and calling curl_version() to report its
+        // absence crashed the command that exists to explain problems.
+        $this->row(
+            'ext-curl',
+            function_exists('curl_version')
+                ? (string) (curl_version()['version'] ?? 'unknown')
+                : 'not installed',
+            function_exists('curl_version'),
+        );
 
         $hasExtension = extension_loaded('opentelemetry');
         $this->row(
