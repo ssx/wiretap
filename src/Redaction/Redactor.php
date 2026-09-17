@@ -108,12 +108,33 @@ final readonly class Redactor
      */
     private function learn(Exchange $exchange, KnownSecrets $known): void
     {
+        // The exchange's own host and path describe the request; they are
+        // never the secret, however they turn up elsewhere.
+        $parts = parse_url($exchange->uri);
+
+        if (is_array($parts)) {
+            foreach (['host', 'path', 'scheme'] as $part) {
+                if (isset($parts[$part]) && is_string($parts[$part])) {
+                    $known->protect($parts[$part]);
+                }
+            }
+        }
+
         // Query parameters and userinfo.
         $this->redactUrl($exchange->uri, $known);
 
         foreach ([$exchange->requestHeaders, $exchange->responseHeaders] as $headers) {
             foreach ($headers as [$name, $value]) {
-                if ($this->isSensitiveHeader($name)) {
+                // Learn only from headers that are credentials by name.
+                //
+                // isSensitiveHeader() is inverted in allowlist mode, where it
+                // means "not explicitly permitted" — which is the right rule
+                // for *removing* a header but a terrible one for deciding what
+                // is a secret worth sweeping everywhere else. It made Host,
+                // Content-Length and User-Agent into secrets, so a record's
+                // own host vanished and an order reference matching a
+                // Content-Length was scrubbed out of the body.
+                if ($this->isCredentialHeader($name)) {
                     $known->remember($value);
                     $known->rememberCredentialValue($value);
                     $known->rememberCookieValues($value);
@@ -200,7 +221,11 @@ final readonly class Redactor
         $parts = parse_url($url);
 
         if ($parts === false) {
-            return $url;
+            // An unparseable URL is not a safe URL. A port above 65535 makes
+            // parse_url fail, curl rejects the request, and the error exchange
+            // was still recorded — with the query string, and its token,
+            // intact. Fall back to a blunt rewrite rather than fail open.
+            return $this->redactUnparseableUrl($url, $known);
         }
 
         $hasQuery = isset($parts['query']) && $parts['query'] !== '';
@@ -224,6 +249,38 @@ final readonly class Redactor
         }
 
         return $this->rebuildUrl($parts, $query);
+    }
+
+    /**
+     * Strip credentials from a URL that parse_url could not read.
+     *
+     * Deliberately crude: userinfo goes, and every configured parameter name
+     * is rewritten wherever it appears. Correctness here matters more than
+     * fidelity, because the alternative is storing the credential.
+     */
+    private function redactUnparseableUrl(string $url, ?KnownSecrets $known = null): string
+    {
+        $replacement = $this->config->replacement;
+
+        $url = Regex::replaceCallback(
+            '~^([a-z][a-z0-9+.\-]*://)[^/@]*@~i',
+            static fn (array $m): string => $m[1] . $replacement . '@',
+            $url,
+        );
+
+        foreach ($this->config->query as $name) {
+            $url = Regex::replaceCallback(
+                '~([?&]' . preg_quote($name, '~') . '=)[^&#]*~i',
+                function (array $m) use ($known, $replacement): string {
+                    $known?->remember(substr($m[0], strlen($m[1])));
+
+                    return $m[1] . $replacement;
+                },
+                $url,
+            );
+        }
+
+        return $url;
     }
 
     /**
@@ -384,6 +441,31 @@ final readonly class Redactor
         ], true);
     }
 
+    /**
+     * Whether this header is a credential by name, regardless of header mode.
+     */
+    private function isCredentialHeader(string $name): bool
+    {
+        $name = strtolower($name);
+
+        foreach (RedactionConfig::DEFAULT_HEADERS as $candidate) {
+            if ($name === $candidate) {
+                return true;
+            }
+        }
+
+        // Anything the deployment added to its own denylist counts too.
+        if ($this->config->headerMode === RedactionConfig::MODE_DENY) {
+            foreach ($this->config->headers as $candidate) {
+                if ($name === strtolower($candidate)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     private function isSensitiveHeader(string $name): bool
     {
         $name = strtolower($name);
@@ -505,6 +587,13 @@ final readonly class Redactor
         // Layer 4, then 5, then the echoed-value sweep.
         $structured = $this->redactStructured($bytes, $body->contentType, $inspected);
 
+        // Detectors need to see decoded form values. http_build_query — which
+        // Guzzle's form_params uses — writes a space as `+`, so a card number
+        // submitted as `card=4111+1111+1111+1111` never matched the PAN
+        // pattern and the safety net missed it too. Decoding here means the
+        // detectors run against what was actually sent.
+        $structured = $this->redactFormValues($structured, $body->contentType);
+
         // Sweep the decoded values rather than the serialised text. Enumerating
         // encodings could never be complete: \u006f is a perfectly ordinary
         // way to write a letter, so a secret echoed as "\u006frdinary-secret"
@@ -621,6 +710,46 @@ final readonly class Redactor
         $encoded = json_encode($decoded, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
         return $encoded === false ? $bytes : $encoded;
+    }
+
+    /**
+     * Run the detectors over decoded form values, re-encoding what changed.
+     *
+     * Applies whether or not body paths are configured: this is about the
+     * built-in detectors seeing real values, not about named rules.
+     */
+    private function redactFormValues(string $bytes, ?string $contentType): string
+    {
+        $type = strtolower(explode(';', $contentType ?? '')[0]);
+
+        if (!str_contains($type, 'x-www-form-urlencoded') || $bytes === '') {
+            return $bytes;
+        }
+
+        parse_str($bytes, $fields);
+
+        if ($fields === []) {
+            return $bytes;
+        }
+
+        $changed = false;
+
+        array_walk_recursive($fields, function (mixed &$value) use (&$changed): void {
+            if (!is_string($value)) {
+                return;
+            }
+
+            $clean = $this->applyPatterns($value);
+
+            if ($clean !== $value) {
+                $value = $clean;
+                $changed = true;
+            }
+        });
+
+        return $changed
+            ? http_build_query($fields, '', '&', PHP_QUERY_RFC3986)
+            : $bytes;
     }
 
     /**

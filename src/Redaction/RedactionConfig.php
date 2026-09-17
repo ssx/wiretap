@@ -115,6 +115,17 @@ final readonly class RedactionConfig
         public int $minEchoedSecretLength = 8,
         public bool $omitUninspectableBodies = true,
     ) {
+        // A hint keyed with an empty string is a public function of the
+        // plaintext. Two million candidates took under four seconds, so a
+        // known card BIN falls in about half an hour on one core — and the
+        // hint sits in the log beside the value it was meant to protect.
+        if ($this->hashHint && ($this->hashSalt === null || $this->hashSalt === '')) {
+            throw new \InvalidArgumentException(
+                'Redaction hash hints need a hashSalt. Without one the hint is an '
+                . 'unkeyed hash of the plaintext and can be reversed offline. Set '
+                . 'hashSalt to a per-install secret, or leave hashHint off.'
+            );
+        }
     }
 
     public function isCapturableType(?string $contentType): bool
