@@ -56,3 +56,16 @@ it('produces ulids that sort by creation time', function (): void {
 
     expect(strcmp($earlier, $later))->toBeLessThan(0);
 });
+
+it('reports whether a correlation is in scope without creating one', function (): void {
+    // id() generates on demand, so asking it would always answer "yes".
+    expect(Correlation::hasStarted())->toBeFalse();
+
+    Correlation::start('scoped');
+
+    expect(Correlation::hasStarted())->toBeTrue();
+
+    Correlation::reset();
+
+    expect(Correlation::hasStarted())->toBeFalse();
+});

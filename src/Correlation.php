@@ -39,6 +39,19 @@ final class Correlation
     }
 
     /**
+     * Whether a correlation is already in scope.
+     *
+     * Deliberately not id(), which generates one as a side effect. A caller
+     * asking "is something already in scope" must be able to find out without
+     * creating the answer — a queue listener needs to know whether it is
+     * inside an enclosing HTTP request before deciding to start its own.
+     */
+    public static function hasStarted(): bool
+    {
+        return self::$id !== null;
+    }
+
+    /**
      * Monotonic position of this call within the current correlation.
      */
     public static function nextSequence(): int
