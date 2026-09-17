@@ -14,8 +14,16 @@ add one of the capture packages:
 
 | Package | Captures | Requires |
 | --- | --- | --- |
-| [`ssx/wiretap-auto`](https://github.com/ssx/wiretap-auto) | curl and Guzzle, including vendor code, with no application changes | `ext-opentelemetry` |
-| [`ssx/wiretap-guzzle`](https://github.com/ssx/wiretap-guzzle) | Guzzle clients you construct yourself | — |
+| [`ssx/wiretap-auto`](https://github.com/ssx/wiretap-auto) | **synchronous** curl and Guzzle, including vendor code, with no application changes | `ext-opentelemetry` |
+| [`ssx/wiretap-guzzle`](https://github.com/ssx/wiretap-guzzle) | Guzzle clients you construct — sync, async and pools | — |
+| [`ssx/wiretap-symfony`](https://github.com/ssx/wiretap-symfony) | Symfony HttpClient | — |
+
+`ssx/wiretap-auto` hooks `curl_exec` and **not** `curl_multi_*`, so async
+Guzzle (`getAsync()`, `Pool`) and Symfony's `CurlHttpClient` are not captured
+by it. Guzzle's default handler only reaches `curl_exec` on its synchronous
+branch. If you own the client, the bridge packages cover async properly; the
+gap is vendor code you cannot edit making async calls. See that package's
+README.
 
 ## ⚠️ This is a debugging tool, not a logging product
 
