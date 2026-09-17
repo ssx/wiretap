@@ -13,7 +13,12 @@ use Ssx\Wiretap\Sink\NullSink;
 /**
  * The pipeline every captured exchange passes through.
  *
- *   blocklist -> enrichers -> redactor -> sampler -> buffer -> sink
+ *   blocklist -> enrichers -> sampler -> redactor -> buffer -> sink
+ *
+ * The sampler sits before the redactor because every input it reads is final
+ * by then, and redaction is the expensive stage: running it on exchanges that
+ * are about to be discarded is pure waste, and it hands the host rule a URI
+ * that has already been rewritten.
  *
  * Buffering exists because writing to a store inline on a customer-facing
  * request is not acceptable. The buffer is bounded in both count and bytes: a
@@ -89,11 +94,21 @@ final class Recorder
                 $exchange = $enricher->enrich($exchange);
             }
 
-            $exchange = $this->redactor->redact($exchange);
-
+            // Sample before redacting, not after.
+            //
+            // Every input the sampler reads — correlation id, failure state,
+            // timings, host — is already final at this point, so the decision
+            // is the same either way. Doing it second meant that at 1%
+            // sampling, 99% of exchanges paid for several JSON decode/encode
+            // passes and every configured regex over a body up to 64 KiB
+            // before being thrown away. It also handed the host rule a URI
+            // that redaction had already rewritten, so a host the operator
+            // named in alwaysHosts could stop matching itself.
             if (!$this->sampler->shouldKeep($exchange)) {
                 return;
             }
+
+            $exchange = $this->redactor->redact($exchange);
 
             $this->buffer($exchange);
         } catch (\Throwable) {

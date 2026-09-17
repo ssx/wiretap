@@ -25,6 +25,12 @@ final readonly class NdjsonReader implements ExchangeReader
 
     public function query(ExchangeQuery $query): iterable
     {
+        // The limit is checked after the yield, so a non-positive one has to
+        // be rejected up front — `--limit=0` returned one record.
+        if ($query->limit <= 0) {
+            return;
+        }
+
         $matched = 0;
         $skipped = 0;
 
@@ -173,9 +179,16 @@ final readonly class NdjsonReader implements ExchangeReader
         }
 
         try {
-            $position = @filesize($file);
+            // fstat on the open handle, not filesize().
+            //
+            // PHP caches stat results per path, so a long-lived reader — a
+            // framework bridge UI polling the same file a worker is appending
+            // to — kept seeing the size from its first look and never returned
+            // the newest records.
+            $stat = @fstat($handle);
+            $position = $stat === false ? 0 : (int) $stat['size'];
 
-            if (!is_int($position) || $position === 0) {
+            if ($position <= 0) {
                 return;
             }
 
