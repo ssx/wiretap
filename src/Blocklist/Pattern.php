@@ -132,8 +132,17 @@ final readonly class Pattern
 
         $parts = parse_url($url);
 
+        // curl accepts a scheme-less URL and defaults to http, so
+        // `api.stripe.com/v1/charges` is a real request that parse_url reads
+        // as a path with no host — and the gate returned false for it.
+        if (is_array($parts) && !isset($parts['host']) && !str_contains($url, '://')) {
+            $parts = parse_url('http://' . ltrim($url, '/'));
+        }
+
         if ($parts === false || !isset($parts['host'])) {
-            return false;
+            // Unreadable. A rule exists to stop this traffic, so an address we
+            // cannot understand is blocked rather than waved through.
+            return true;
         }
 
         if (!$this->hostMatches(self::normaliseHost($parts['host']))) {
@@ -144,7 +153,46 @@ final readonly class Pattern
             return true;
         }
 
-        return str_starts_with($parts['path'] ?? '/', $this->pathPrefix);
+        return str_starts_with(
+            self::normalisePath($parts['path'] ?? '/'),
+            self::normalisePath($this->pathPrefix),
+        );
+    }
+
+    /**
+     * Normalise a path the way the request reaching the wire will look.
+     *
+     * curl resolves dot-segments before sending, so `/v2/../v2/payments` is
+     * `/v2/payments` on the wire while a literal prefix comparison saw two
+     * different strings. Percent-encoding and repeated slashes hide the same
+     * path equally well, and case is folded because a gate that blocks too
+     * much is the safe direction.
+     */
+    private static function normalisePath(string $path): string
+    {
+        $path = rawurldecode($path);
+        $path = preg_replace('~/+~', '/', $path) ?? $path;
+
+        $segments = [];
+
+        foreach (explode('/', $path) as $segment) {
+            if ($segment === '.' || $segment === '') {
+                continue;
+            }
+
+            if ($segment === '..') {
+                array_pop($segments);
+
+                continue;
+            }
+
+            $segments[] = $segment;
+        }
+
+        $normalised = '/' . implode('/', $segments);
+
+        // A trailing slash is not a different resource for prefix purposes.
+        return strtolower(rtrim($normalised, '/')) ?: '/';
     }
 
     private function hostMatches(string $host): bool
