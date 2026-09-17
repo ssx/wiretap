@@ -110,7 +110,22 @@ final readonly class EnvBlocklistProvider implements BlocklistProvider
             $current .= $char;
         }
 
-        $patterns[] = $current;
+        if ($inRegex) {
+            // The regex was never closed — a typo. Everything after its
+            // opening tilde was swallowed into one token, so a mistake in the
+            // first rule silently discarded every rule after it and left
+            // nothing blocked and nothing reported.
+            //
+            // Re-split the unterminated remainder plainly. The broken regex
+            // itself still fails to compile and is reported as an error, which
+            // is the outcome someone can act on; the rules after it survive.
+            $patterns = array_merge(
+                $patterns,
+                preg_split('/[,\r\n]+/', $current) ?: [$current],
+            );
+        } else {
+            $patterns[] = $current;
+        }
 
         return array_values(array_filter(
             array_map('trim', $patterns),
