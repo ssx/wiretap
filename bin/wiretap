@@ -1,0 +1,29 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use Ssx\Wiretap\Cli\Application;
+
+// Works both as a project dependency and as a standalone clone.
+$autoloaders = [
+    __DIR__ . '/../vendor/autoload.php',
+    __DIR__ . '/../../../autoload.php',
+    __DIR__ . '/../../autoload.php',
+];
+
+foreach ($autoloaders as $autoloader) {
+    if (is_file($autoloader)) {
+        require $autoloader;
+
+        break;
+    }
+}
+
+if (!class_exists(Application::class)) {
+    fwrite(STDERR, "wiretap: could not find the Composer autoloader. Run composer install.\n");
+
+    exit(1);
+}
+
+exit((new Application())->run($argv));

@@ -3,7 +3,14 @@
     "description": "Capture outbound HTTP requests and responses in PHP, including calls made by code you cannot edit.",
     "type": "library",
     "license": "MIT",
-    "keywords": ["http", "debugging", "logging", "curl", "guzzle", "observability"],
+    "keywords": [
+        "http",
+        "debugging",
+        "logging",
+        "curl",
+        "guzzle",
+        "observability"
+    ],
     "authors": [
         {
             "name": "Scott Robinson",
@@ -41,9 +48,12 @@
     },
     "scripts": {
         "test": "pest",
-        "stan": "phpstan analyse",
+        "stan": "phpstan analyse --memory-limit=512M",
         "fix": "php-cs-fixer fix"
     },
     "minimum-stability": "stable",
-    "prefer-stable": true
+    "prefer-stable": true,
+    "bin": [
+        "bin/wiretap"
+    ]
 }

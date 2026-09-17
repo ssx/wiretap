@@ -127,6 +127,23 @@ final readonly class CapturedBody implements \JsonSerializable
     }
 
     /**
+     * Rebuild from a decoded NDJSON record.
+     *
+     * @param array<string, mixed> $data
+     */
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            bytes: isset($data['bytes']) ? (string) $data['bytes'] : null,
+            size: isset($data['size']) ? (int) $data['size'] : null,
+            sha256: isset($data['sha256']) ? (string) $data['sha256'] : null,
+            contentType: isset($data['content_type']) ? (string) $data['content_type'] : null,
+            truncated: (bool) ($data['truncated'] ?? false),
+            omittedReason: isset($data['omitted_reason']) ? (string) $data['omitted_reason'] : null,
+        );
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function jsonSerialize(): array

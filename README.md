@@ -77,6 +77,62 @@ reads six hours into debugging a payment gateway.
 
 PHP 8.1 reached end of life on 31 December 2025.
 
+## Getting the data back out
+
+```
+vendor/bin/wiretap list --host=api.example.com --limit=20
+
+  #   WHEN           METHOD STATUS     TIME  URI
+  1   12s ago        POST   502      1,841ms  https://api.example.com/v2/orders
+  2   14s ago        GET    200        212ms  https://api.example.com/v2/orders/9f1
+
+vendor/bin/wiretap show 1
+```
+
+`show` prints the full pair: headers both ways, pretty-printed bodies, and a
+timing breakdown. A bare number means "the nth row of the listing I just looked
+at", which is how people actually refer to these.
+
+| Command | What it does |
+| --- | --- |
+| `list` | recorded exchanges, newest first |
+| `show <n\|id>` | one exchange in full; `--curl`, `--har`, `--json`, `--raw` |
+| `trace <correlation-id>` | every call made during one inbound request, as a waterfall |
+| `export` | HAR 1.2 to stdout or `--out=file.har` |
+| `prune --older-than=7d` | delete logs past a retention window |
+| `doctor` | what is and is not being captured, and why |
+
+Filters apply to `list`, `show` and `export`: `--host`, `--method`,
+`--status=502`, `--status=5xx`, `--failed`, `--since=30m`, `--limit`,
+`--offset`.
+
+### HAR export
+
+```bash
+vendor/bin/wiretap export --failed --out=failures.har
+```
+
+The single highest-leverage thing in the package, and barely any code. HAR 1.2
+is what Chrome DevTools, Firefox, Proxyman, Charles, Insomnia and Postman all
+import, so supporting it makes every one of them a viewer for wiretap's data.
+Building a bespoke UI instead would buy a worse version of what five mature
+tools already do.
+
+Wiretap's own context — correlation id, transport, route, console command,
+truncation and omission reasons — rides along in a `_wiretap` key, which HAR
+viewers display in their detail panes.
+
+### `wiretap doctor`
+
+Answers "why is nothing being recorded", which otherwise costs an afternoon:
+PHP version, extension state, log directory, whether `WIRETAP_ENABLED` is set,
+recent traffic by host, and blocklist pattern counts per source.
+
+It also warns when capture has been left on for more than 24 hours. A tool
+documented as temporary but behaving identically on day ninety will be left on;
+the warning is the only part of that policy that actually runs.
+
+
 ## The blocklist
 
 Redaction reduces what is stored. The blocklist decides whether a call is
