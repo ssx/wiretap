@@ -210,6 +210,12 @@ Captures only what happened inside the closure, regardless of whether capture
 is globally enabled or sampled, and restores the previous recorder afterwards
 — including when the closure throws.
 
+It keeps the blocklist and redaction rules the surrounding process is
+configured with, so using it in a running application does not quietly widen
+what gets recorded. `fake()` is the one that switches both off, because a test
+asserting on a value the redactor would have replaced is the whole point of a
+test double.
+
 
 ## The blocklist
 

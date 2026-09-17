@@ -25,15 +25,40 @@ final class KnownSecrets
     /** @var array<string, true> */
     private array $values = [];
 
+    /**
+     * Values that must never be treated as secret, however they arrive.
+     *
+     * The exchange's own host is the case that matters: a Set-Cookie carrying
+     * `Domain=api.example.com` made the host a "secret", and the record then
+     * described a request to `https://[REDACTED]` — breaking `list --host`,
+     * toHost() and alwaysHosts sampling, in a tool whose job is to say what
+     * happened.
+     *
+     * @var array<string, true>
+     */
+    private array $protected = [];
+
     public function __construct(private readonly int $minLength = 8)
     {
+    }
+
+    /**
+     * Mark a value as never-secret. Call before remembering anything.
+     */
+    public function protect(string $value): void
+    {
+        $value = trim($value);
+
+        if ($value !== '') {
+            $this->protected[$value] = true;
+        }
     }
 
     public function remember(string $value): void
     {
         $value = trim($value);
 
-        if (strlen($value) < $this->minLength) {
+        if (strlen($value) < $this->minLength || isset($this->protected[$value])) {
             return;
         }
 
@@ -42,7 +67,9 @@ final class KnownSecrets
         // The same value appears in other encodings depending on where it is
         // echoed back, and a literal comparison misses every one of them.
         foreach ($this->encodingsOf($value) as $variant) {
-            if ($variant !== $value && strlen($variant) >= $this->minLength) {
+            if ($variant !== $value
+                && strlen($variant) >= $this->minLength
+                && !isset($this->protected[$variant])) {
                 $this->values[$variant] = true;
             }
         }
@@ -86,12 +113,15 @@ final class KnownSecrets
      */
     public function rememberCookieValues(string $headerValue): void
     {
-        foreach (explode(';', $headerValue) as $pair) {
-            $parts = explode('=', trim($pair), 2);
+        // Only the first pair. Everything after the first semicolon is
+        // attributes — Domain, Path, Expires, SameSite — and treating those as
+        // secrets meant a response that set a cookie scoped to its own domain
+        // redacted that domain out of its own record.
+        $first = explode(';', $headerValue, 2)[0];
+        $parts = explode('=', trim($first), 2);
 
-            if (count($parts) === 2) {
-                $this->remember(trim($parts[1], " \t\"'"));
-            }
+        if (count($parts) === 2) {
+            $this->remember(trim($parts[1], " \t\"'"));
         }
     }
 

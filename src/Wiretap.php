@@ -116,7 +116,26 @@ final class Wiretap
         $previousRecorder = self::$recorder;
         $previousFake = self::$fakeSink;
 
-        $sink = self::fake();
+        // Keeps the current blocklist and redactor. It used to call fake(),
+        // which disables both — so a documented production helper unblocked
+        // every payment gateway and captured live keys and card numbers in
+        // plaintext, ready for the next dump() or toHar().
+        //
+        // fake() keeps that behaviour, because a test asserting on a value the
+        // redactor would have replaced is the point of a test double. A live
+        // process is not a test.
+        $current = self::recorder();
+        $sink = new InMemorySink(limit: 10_000);
+        self::$fakeSink = $sink;
+
+        self::$recorder = new Recorder(
+            sink: $sink,
+            blocklist: $current->blocklist(),
+            redactor: $current->redactor(),
+            // Everything, regardless of the global sample rate: the caller
+            // asked for these specific calls.
+            sampler: new Sampler(),
+        );
 
         try {
             return $callback();

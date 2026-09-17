@@ -227,6 +227,11 @@ final class Recorder
         return $this->blocklist;
     }
 
+    public function redactor(): Redactor
+    {
+        return $this->redactor;
+    }
+
     public function enable(): self
     {
         $this->enabled = true;
