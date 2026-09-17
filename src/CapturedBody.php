@@ -56,7 +56,11 @@ final readonly class CapturedBody implements \JsonSerializable
     ): self {
         return new self(
             bytes: $bytes,
-            size: $size ?? strlen($bytes),
+            // A truncated capture with no known size stays unknown. Falling
+            // back to the prefix length claimed the prefix *was* the whole
+            // body, so a HAR export reported a four-byte transfer for a body
+            // of unknown length.
+            size: $size ?? ($truncated ? null : strlen($bytes)),
             sha256: $sha256,
             contentType: $contentType,
             truncated: $truncated,

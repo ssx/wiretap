@@ -249,3 +249,79 @@ describe('overlapping known secrets', function (): void {
             ->not->toContain('SECRETTAIL');
     });
 });
+
+describe('review gaps closed', function (): void {
+    it('scrubs a secret echoed back in its JSON-escaped form', function (): void {
+        // A token containing a slash is written as abc\/def inside a
+        // serialised body, so scrubbing the raw form found nothing.
+        $secret = 'abc/defghijk';
+
+        $exchange = exchange(
+            uri: 'https://api.example.com/v1?token=' . rawurlencode($secret),
+            responseBody: CapturedBody::captured(
+                json_encode(['echo' => $secret]),
+                contentType: 'application/json',
+            ),
+        );
+
+        expect((new Redactor())->redact($exchange)->responseBody->bytes)
+            ->not->toContain('defghijk');
+    });
+
+    it('redacts the reason phrase and tags', function (): void {
+        // Both are persisted like everything else. The reason phrase is
+        // server-controlled and tags come from integrations.
+        $exchange = exchange(uri: 'https://api.example.com/v1?api_key=SUPERSECRETVALUE')
+            ->withReason('failed for https://api.example.com/v1?api_key=SUPERSECRETVALUE')
+            ->withTags(['ref:https://api.example.com/v1?api_key=SUPERSECRETVALUE']);
+
+        $result = (new Redactor())->redact($exchange);
+
+        expect($result->reason)->not->toContain('SUPERSECRETVALUE')
+            ->and(implode(' ', $result->tags))->not->toContain('SUPERSECRETVALUE');
+    });
+
+    it('keeps an unknown full size on a truncated capture', function (): void {
+        // Reporting the prefix length as the full size made a HAR export claim
+        // a 4-byte transfer for a body of unknown length.
+        $body = CapturedBody::captured('abcd', size: null, truncated: true);
+
+        expect($body->size)->toBeNull()
+            ->and($body->truncated)->toBeTrue();
+    });
+});
+
+describe('a broken custom redaction pattern', function (): void {
+    it('is reported rather than silently skipped', function (): void {
+        $redactor = new Redactor(new RedactionConfig(custom: ['/valid/', '/[unclosed/']));
+
+        expect($redactor->invalidPatterns())->toBe(['/[unclosed/']);
+    });
+
+    it('drops bodies rather than storing what an intended rule never examined', function (): void {
+        // The pattern does not compile, so it never runs. Storing the body
+        // anyway leaves someone believing a rule protected it.
+        $redactor = new Redactor(new RedactionConfig(custom: ['/[unclosed/']));
+
+        $result = $redactor->redactBody(CapturedBody::captured(
+            '{"note":"whatever the broken rule was meant to catch"}',
+            contentType: 'application/json',
+        ));
+
+        expect($result->isPresent())->toBeFalse()
+            ->and($result->omittedReason)->toBe(CapturedBody::OMITTED_REDACTED);
+    });
+
+    it('leaves bodies alone when every custom pattern compiles', function (): void {
+        $redactor = new Redactor(new RedactionConfig(custom: ['/tok_[a-z0-9]+/']));
+
+        $result = $redactor->redactBody(CapturedBody::captured(
+            '{"note":"tok_abc123 and some text"}',
+            contentType: 'application/json',
+        ));
+
+        expect($result->isPresent())->toBeTrue()
+            ->and($result->bytes)->not->toContain('tok_abc123')
+            ->and($result->bytes)->toContain('some text');
+    });
+});

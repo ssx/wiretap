@@ -102,6 +102,19 @@ final readonly class Exchange implements \JsonSerializable
         return $this->with(error: $error);
     }
 
+    public function withReason(?string $reason): self
+    {
+        return $this->with(reason: $reason);
+    }
+
+    /**
+     * @param list<string> $tags
+     */
+    public function withTags(array $tags): self
+    {
+        return $this->with(tags: $tags);
+    }
+
     /**
      * @param array<string, scalar|null> $context
      */
@@ -121,7 +134,7 @@ final readonly class Exchange implements \JsonSerializable
             requestHeaders: $overrides['requestHeaders'] ?? $this->requestHeaders,
             requestBody: $overrides['requestBody'] ?? $this->requestBody,
             status: $overrides['status'] ?? $this->status,
-            reason: $overrides['reason'] ?? $this->reason,
+            reason: array_key_exists('reason', $overrides) ? $overrides['reason'] : $this->reason,
             responseHeaders: $overrides['responseHeaders'] ?? $this->responseHeaders,
             responseBody: $overrides['responseBody'] ?? $this->responseBody,
             timings: $overrides['timings'] ?? $this->timings,
