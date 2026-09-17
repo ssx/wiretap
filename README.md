@@ -133,6 +133,76 @@ documented as temporary but behaving identically on day ninety will be left on;
 the warning is the only part of that policy that actually runs.
 
 
+## Testing
+
+Wiretap doubles as an assertion library for outbound HTTP. This is worth
+having even if you never switch capture on in production.
+
+```php
+use Ssx\Wiretap\Wiretap;
+use Ssx\Wiretap\Exchange;
+
+Wiretap::fake();
+
+$service->syncOrders();
+
+Wiretap::assertSent('api.example.com', times: 2);
+Wiretap::assertSent(fn (Exchange $e) => $e->method === 'POST' && $e->status === 201);
+Wiretap::assertNothingSentTo('api.stripe.com');
+Wiretap::assertSentCount(2);
+```
+
+`fake()` captures in memory, keeps everything, and turns redaction **off** —
+asserting on a value the redactor would have replaced is the point of a test
+double. It also starts with an empty blocklist, so a test asserting on a
+payment call is not defeated by the payment-gateways preset.
+
+Failures list what actually happened, so the first move is not to add a
+`dump()` and run again:
+
+```
+Expected a request to host [nope.example.com], but none was sent.
+
+Recorded:
+  1. POST https://api.example.com/v1/orders -> 201
+  2. GET https://api.example.com/v1/health -> 500
+```
+
+Assertions route through PHPUnit's `Assert` when it is loaded, so a failure
+counts as a failed assertion rather than an errored test. Without PHPUnit they
+throw `Ssx\Wiretap\Testing\AssertionFailed`, so the API works under Pest,
+PHPUnit or anything else.
+
+### Inspecting a capture
+
+```php
+$calls = Wiretap::recorded();
+
+$calls->toHost('api.example.com');
+$calls->withMethod('POST');
+$calls->withStatus(500);
+$calls->failed();
+$calls->first()->requestBody->bytes;
+
+file_put_contents('test-run.har', $calls->toHar());
+```
+
+That last line is occasionally the fastest way to understand a failing
+integration test: open it in the tool you would have used against production.
+
+### Scoped capture in a running application
+
+```php
+$result = Wiretap::debug(fn () => $service->syncOrders(), $calls);
+
+echo count($calls), ' calls made';
+```
+
+Captures only what happened inside the closure, regardless of whether capture
+is globally enabled or sampled, and restores the previous recorder afterwards
+— including when the closure throws.
+
+
 ## The blocklist
 
 Redaction reduces what is stored. The blocklist decides whether a call is
