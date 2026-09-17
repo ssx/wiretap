@@ -8,6 +8,7 @@ use Ssx\Wiretap\CapturedBody;
 use Ssx\Wiretap\Exchange;
 use Ssx\Wiretap\Headers;
 use Ssx\Wiretap\TransferError;
+use Ssx\Wiretap\Support\QueryString;
 use Ssx\Wiretap\Support\Regex;
 
 /**
@@ -240,8 +241,9 @@ final readonly class Redactor
         $query = '';
 
         if ($hasQuery) {
-            parse_str((string) $parts['query'], $params);
-            $query = http_build_query($this->redactQueryParams($params, $known), '', '&', PHP_QUERY_RFC3986);
+            $query = QueryString::build(
+                $this->redactQueryPairs(QueryString::parse((string) $parts['query']), $known),
+            );
         }
 
         if ($known !== null && isset($parts['pass'])) {
@@ -301,47 +303,32 @@ final readonly class Redactor
      *
      * @return array<array-key, mixed>
      */
-    private function redactQueryParams(array $params, ?KnownSecrets $known = null): array
+    /**
+     * Redact sensitive pairs, learning what was removed.
+     *
+     * Every pair is visited, so a repeated name is handled once per
+     * occurrence. `token=A&token=B` used to collapse to a single value and
+     * only A or B was ever learned as a secret — a response echoing the other
+     * one was then stored in plaintext.
+     *
+     * @param  list<array{string, string|null}> $pairs
+     * @return list<array{string, string|null}>
+     */
+    private function redactQueryPairs(array $pairs, ?KnownSecrets $known = null): array
     {
-        foreach ($params as $name => $value) {
-            // Sensitivity is decided before recursing. Checking the leaf only
-            // meant `?token[]=secret` recursed into an array whose keys are
-            // 0, 1, 2 — none of which is a sensitive name — and the value
-            // survived untouched.
-            if ($this->isSensitiveQueryParam((string) $name)) {
-                $params[$name] = is_array($value)
-                    ? $this->redactEverything($value, $known)
-                    : $this->redactLeaf($value, $known);
-
+        foreach ($pairs as $index => [$name, $value]) {
+            // `token[]` and `token[0]` are both covered by a rule naming
+            // `token`: the subscript is addressing, not a different field.
+            if ($value === null || !$this->isSensitiveQueryParam(QueryString::baseName($name))) {
                 continue;
             }
 
-            if (is_array($value)) {
-                /** @var array<array-key, mixed> $value */
-                $params[$name] = $this->redactQueryParams($value, $known);
-            }
+            $pairs[$index] = [$name, $this->redactLeaf($value, $known)];
         }
 
-        return $params;
+        return $pairs;
     }
 
-    /**
-     * Every leaf beneath a sensitive parameter is itself sensitive.
-     *
-     * @param array<array-key, mixed> $values
-     *
-     * @return array<array-key, mixed>
-     */
-    private function redactEverything(array $values, ?KnownSecrets $known = null): array
-    {
-        foreach ($values as $key => $value) {
-            $values[$key] = is_array($value)
-                ? $this->redactEverything($value, $known)
-                : $this->redactLeaf($value, $known);
-        }
-
-        return $values;
-    }
 
     private function redactLeaf(mixed $value, ?KnownSecrets $known = null): string
     {
@@ -762,30 +749,31 @@ final readonly class Redactor
             return $bytes;
         }
 
-        parse_str($bytes, $fields);
+        $pairs = QueryString::parse($bytes);
 
-        if ($fields === []) {
+        if ($pairs === []) {
             return $bytes;
         }
 
         $changed = false;
 
-        array_walk_recursive($fields, function (mixed &$value) use (&$changed): void {
-            if (!is_string($value)) {
-                return;
+        foreach ($pairs as $index => [$name, $value]) {
+            if ($value === null) {
+                continue;
             }
 
             $clean = $this->applyPatterns($value);
 
             if ($clean !== $value) {
-                $value = $clean;
+                $pairs[$index] = [$name, $clean];
                 $changed = true;
             }
-        });
+        }
 
-        return $changed
-            ? http_build_query($fields, '', '&', PHP_QUERY_RFC3986)
-            : $bytes;
+        // An unchanged body goes back exactly as it arrived. Rebuilding it
+        // regardless would re-encode every field and drop repeated names,
+        // which is the same falsification the JSON path used to commit.
+        return $changed ? QueryString::build($pairs) : $bytes;
     }
 
     /**
@@ -908,11 +896,42 @@ final readonly class Redactor
         $type = strtolower(explode(';', $contentType ?? '')[0]);
 
         if (str_contains($type, 'x-www-form-urlencoded')) {
-            parse_str($bytes, $form);
-            $form = $this->redactPaths($form, $this->config->bodyPaths);
+            // parse_str truncates at max_input_vars (1000 by default) and
+            // raises E_WARNING while doing it. Both matter: the fields past
+            // the limit are invisible to the path rules, so a body could be
+            // marked inspected while the field the operator named was never
+            // looked at — and under a framework error handler that warning
+            // becomes an exception thrown from inside the instrumentation,
+            // which Recorder::record() then swallows along with the whole
+            // exchange.
+            $overflowed = false;
+
+            set_error_handler(static function (int $_, string $message) use (&$overflowed): bool {
+                $overflowed = $overflowed || str_contains($message, 'Input variables exceeded');
+
+                return true;
+            });
+
+            try {
+                parse_str($bytes, $form);
+            } finally {
+                restore_error_handler();
+            }
+
+            if ($overflowed) {
+                // Not inspected. The caller falls back to the safety net
+                // rather than persisting a body whose rules never ran.
+                return $bytes;
+            }
+
+            $redacted = $this->redactPaths($form, $this->config->bodyPaths);
             $inspected = true;
 
-            return http_build_query($form, '', '&', PHP_QUERY_RFC3986);
+            // Rebuilding an unchanged body would re-encode every field and
+            // drop repeated names for no benefit.
+            return $redacted === $form
+                ? $bytes
+                : http_build_query($redacted, '', '&', PHP_QUERY_RFC3986);
         }
 
         $decoded = json_decode($bytes, true);

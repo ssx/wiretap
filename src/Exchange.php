@@ -120,7 +120,10 @@ final readonly class Exchange implements \JsonSerializable
      */
     public function withContext(array $context): self
     {
-        return $this->with(context: [...$this->context, ...$context]);
+        // array_replace, not a spread: the spread renumbers integer keys, so
+        // a redacted value was appended *beside* the original rather than
+        // replacing it, and the plaintext stayed in the record.
+        return $this->with(context: array_replace($this->context, $context));
     }
 
     private function with(mixed ...$overrides): self
