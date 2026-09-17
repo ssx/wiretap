@@ -41,12 +41,18 @@ final readonly class Redactor
             return $exchange;
         }
 
+        // Values removed from the URL and the headers are known secrets. An
+        // API that echoes its input back — and a great many do — would
+        // otherwise hand the same value straight back in the response body,
+        // where no structural rule is looking for it.
+        $known = new KnownSecrets($this->config->minEchoedSecretLength);
+
         return $exchange
-            ->withUri($this->redactUrl($exchange->uri))
-            ->withRequestHeaders($this->redactHeaders($exchange->requestHeaders))
-            ->withResponseHeaders($this->redactHeaders($exchange->responseHeaders))
-            ->withRequestBody($this->redactBody($exchange->requestBody))
-            ->withResponseBody($this->redactBody($exchange->responseBody));
+            ->withUri($this->redactUrl($exchange->uri, $known))
+            ->withRequestHeaders($this->redactHeaders($exchange->requestHeaders, $known))
+            ->withResponseHeaders($this->redactHeaders($exchange->responseHeaders, $known))
+            ->withRequestBody($this->redactBody($exchange->requestBody, $known))
+            ->withResponseBody($this->redactBody($exchange->responseBody, $known));
     }
 
     /**
@@ -54,7 +60,7 @@ final readonly class Redactor
      * whole URL, so a parameter value that happens to contain an ampersand
      * cannot smuggle plaintext through.
      */
-    public function redactUrl(string $url): string
+    public function redactUrl(string $url, ?KnownSecrets $known = null): string
     {
         $parts = parse_url($url);
 
@@ -75,7 +81,11 @@ final readonly class Redactor
 
         if ($hasQuery) {
             parse_str((string) $parts['query'], $params);
-            $query = http_build_query($this->redactQueryParams($params), '', '&', PHP_QUERY_RFC3986);
+            $query = http_build_query($this->redactQueryParams($params, $known), '', '&', PHP_QUERY_RFC3986);
+        }
+
+        if ($known !== null && isset($parts['pass'])) {
+            $known->remember((string) $parts['pass']);
         }
 
         return $this->rebuildUrl($parts, $query);
@@ -86,18 +96,20 @@ final readonly class Redactor
      *
      * @return array<array-key, mixed>
      */
-    private function redactQueryParams(array $params): array
+    private function redactQueryParams(array $params, ?KnownSecrets $known = null): array
     {
         foreach ($params as $name => $value) {
             if (is_array($value)) {
                 /** @var array<array-key, mixed> $value */
-                $params[$name] = $this->redactQueryParams($value);
+                $params[$name] = $this->redactQueryParams($value, $known);
 
                 continue;
             }
 
             if ($this->isSensitiveQueryParam((string) $name)) {
-                $params[$name] = $this->replacementFor(is_scalar($value) ? (string) $value : '');
+                $original = is_scalar($value) ? (string) $value : '';
+                $known?->remember($original);
+                $params[$name] = $this->replacementFor($original);
             }
         }
 
@@ -148,10 +160,13 @@ final readonly class Redactor
      * Layer 3. Denylist by default; allowlist for regulated deployments,
      * where anything not explicitly permitted is removed.
      */
-    public function redactHeaders(Headers $headers): Headers
+    public function redactHeaders(Headers $headers, ?KnownSecrets $known = null): Headers
     {
-        return $headers->map(function (string $name, string $value): string {
+        return $headers->map(function (string $name, string $value) use ($known): string {
             if ($this->isSensitiveHeader($name)) {
+                $known?->remember($value);
+                $known?->rememberCredentialValue($value);
+
                 return $this->replacementFor($value);
             }
 
@@ -186,7 +201,7 @@ final readonly class Redactor
     /**
      * Layers 1, 4, 5 and 6.
      */
-    public function redactBody(CapturedBody $body): CapturedBody
+    public function redactBody(CapturedBody $body, ?KnownSecrets $known = null): CapturedBody
     {
         if (!$body->isPresent()) {
             return $body;
@@ -204,9 +219,13 @@ final readonly class Redactor
 
         $bytes = (string) $body->bytes;
 
-        // Layer 4, then 5.
+        // Layer 4, then 5, then the echoed-value sweep.
         $bytes = $this->redactStructured($bytes, $body->contentType);
         $bytes = $this->applyPatterns($bytes);
+
+        if ($known !== null) {
+            $bytes = $known->scrub($bytes, $this->config->replacement);
+        }
 
         // Layer 6. A mis-scoped path rule should not be able to become an
         // incident, so the finished value is scanned once more and the whole

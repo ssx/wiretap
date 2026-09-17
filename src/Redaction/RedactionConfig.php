@@ -112,6 +112,7 @@ final readonly class RedactionConfig
         public array $capturableTypes = self::DEFAULT_CAPTURABLE_TYPES,
         public int $maxBodyBytes = 65536,
         public int $maxHeaderValueBytes = 4096,
+        public int $minEchoedSecretLength = 8,
     ) {
     }
 
@@ -151,6 +152,7 @@ final readonly class RedactionConfig
             capturableTypes: $this->capturableTypes,
             maxBodyBytes: $this->maxBodyBytes,
             maxHeaderValueBytes: $this->maxHeaderValueBytes,
+            minEchoedSecretLength: $this->minEchoedSecretLength,
         );
     }
 }
