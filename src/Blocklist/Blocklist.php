@@ -43,13 +43,35 @@ final class Blocklist
     private bool $failedClosed = false;
 
     /**
-     * @param iterable<BlocklistProvider> $providers
+     * When the failed-closed compile happened, so it can be retried.
      */
-    public function __construct(iterable $providers = [])
+    private ?int $failedAt = null;
+
+    /**
+     * @param iterable<BlocklistProvider> $providers
+     * @param int $retryFailedAfterSeconds How long a failed-closed state is
+     *        held before the providers are asked again; 0 disables the retry
+     */
+    public function __construct(iterable $providers = [], private readonly int $retryFailedAfterSeconds = 60)
     {
         foreach ($providers as $provider) {
             $this->add($provider);
         }
+    }
+
+    /**
+     * Discard the compiled rules so the providers are read again.
+     *
+     * For a long-running worker that wants to pick up a configuration change,
+     * and for the failed-closed case: a database that was unreachable at the
+     * first blocks() call otherwise blocks all capture for the life of the
+     * process, which is safe but means one transient blip costs the whole
+     * shift's debugging.
+     */
+    public function invalidate(): void
+    {
+        $this->compiled = null;
+        $this->failedAt = null;
     }
 
     public function add(BlocklistProvider $provider): self
@@ -99,6 +121,18 @@ final class Blocklist
      */
     public function patterns(): array
     {
+        // A failed-closed state is held, then retried. Recompiling on every
+        // call would hammer an unreachable database once per outbound request;
+        // never recompiling means a blip at startup disables capture until the
+        // process is restarted. Neither is what an operator wants.
+        if ($this->compiled !== null
+            && $this->failedClosed
+            && $this->retryFailedAfterSeconds > 0
+            && $this->failedAt !== null
+            && (time() - $this->failedAt) >= $this->retryFailedAfterSeconds) {
+            $this->compiled = null;
+        }
+
         return $this->compiled ??= $this->compile();
     }
 
@@ -111,6 +145,7 @@ final class Blocklist
         $seen = [];
         $this->errors = [];
         $this->failedClosed = false;
+        $this->failedAt = null;
 
         foreach ($this->providers as $provider) {
             try {
@@ -146,6 +181,7 @@ final class Blocklist
                     $e->getMessage(),
                 );
                 $this->failedClosed = true;
+                $this->failedAt = time();
             }
         }
 

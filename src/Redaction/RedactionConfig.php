@@ -73,12 +73,11 @@ final readonly class RedactionConfig
      */
     public const DEFAULT_CAPTURABLE_TYPES = [
         'application/json',
-        'application/problem+json',
-        'application/ld+json',
         'application/xml',
         'text/xml',
         'application/x-www-form-urlencoded',
         'application/graphql',
+        'application/x-ndjson',
         'text/',
     ];
 
@@ -140,6 +139,17 @@ final readonly class RedactionConfig
 
         foreach ($this->capturableTypes as $allowed) {
             if (str_starts_with($type, strtolower($allowed))) {
+                return true;
+            }
+        }
+
+        // RFC 6839 structured syntax suffixes. Listing individual vendor
+        // types could never keep up: application/vnd.api+json,
+        // application/hal+json and application/vnd.github+json were all
+        // recorded as binary and dropped, because only two of the dozens of
+        // +json types in use happened to be in the list.
+        foreach (['+json', '+xml'] as $suffix) {
+            if (str_ends_with($type, $suffix)) {
                 return true;
             }
         }

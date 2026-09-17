@@ -55,8 +55,16 @@ final readonly class PresetBlocklistProvider implements BlocklistProvider
         // Instance metadata endpoints hand out short-lived cloud credentials.
         // Capturing a response from one puts an IAM token in the log.
         self::CLOUD_METADATA => [
+            // A metadata response carries short-lived IAM credentials, so
+            // every route to one has to be covered, not just the famous one.
             '169.254.169.254',
+            // AWS IMDS over IPv6. Enabled by default on IPv6-only subnets and
+            // reaches exactly the same endpoint as 169.254.169.254.
+            '[fd00:ec2::254]',
+            'fd00:ec2::254',
             'metadata.google.internal',
+            // GCE resolves the bare name too, and client libraries use it.
+            'metadata',
             '100.100.100.200',
         ],
     ];
