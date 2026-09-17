@@ -28,6 +28,18 @@ final readonly class TransferError implements \JsonSerializable
     }
 
     /**
+     * @param array<string, mixed> $data
+     */
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            errno: (int) ($data['errno'] ?? -1),
+            message: (string) ($data['message'] ?? ''),
+            class: isset($data['class']) ? (string) $data['class'] : null,
+        );
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function jsonSerialize(): array

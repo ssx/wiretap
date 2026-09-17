@@ -133,6 +133,60 @@ final readonly class Exchange implements \JsonSerializable
     }
 
     /**
+     * Rebuild from one decoded NDJSON line.
+     *
+     * Tolerant by design: a log file written by an older version, or one
+     * truncated mid-write, should still yield everything that survived rather
+     * than throwing and taking the whole listing with it.
+     *
+     * @param array<string, mixed> $data
+     */
+    public static function fromArray(array $data): self
+    {
+        /** @var array<string, mixed> $request */
+        $request = is_array($data['request'] ?? null) ? $data['request'] : [];
+        /** @var array<string, mixed> $response */
+        $response = is_array($data['response'] ?? null) ? $data['response'] : [];
+
+        $headers = static function (mixed $pairs): Headers {
+            if (!is_array($pairs)) {
+                return Headers::empty();
+            }
+
+            /** @var list<array{0: string, 1: string}> $pairs */
+            return Headers::fromPairs($pairs);
+        };
+
+        $body = static fn (mixed $b): CapturedBody => is_array($b)
+            ? CapturedBody::fromArray($b)
+            : CapturedBody::none();
+
+        return new self(
+            id: (string) ($data['id'] ?? ''),
+            correlationId: (string) ($data['correlation_id'] ?? ''),
+            transport: (string) ($data['transport'] ?? self::TRANSPORT_CURL),
+            method: (string) ($data['method'] ?? 'GET'),
+            uri: (string) ($data['uri'] ?? ''),
+            requestHeaders: $headers($request['headers'] ?? null),
+            requestBody: $body($request['body'] ?? null),
+            status: isset($data['status']) ? (int) $data['status'] : null,
+            reason: isset($data['reason']) ? (string) $data['reason'] : null,
+            responseHeaders: $headers($response['headers'] ?? null),
+            responseBody: $body($response['body'] ?? null),
+            timings: is_array($data['timings'] ?? null) ? Timings::fromArray($data['timings']) : new Timings(),
+            error: is_array($data['error'] ?? null) ? TransferError::fromArray($data['error']) : null,
+            startedAt: (float) ($data['started_at'] ?? 0.0),
+            parentExchangeId: isset($data['parent_exchange_id']) ? (string) $data['parent_exchange_id'] : null,
+            sequence: (int) ($data['sequence'] ?? 0),
+            attempt: (int) ($data['attempt'] ?? 1),
+            context: is_array($data['context'] ?? null) ? $data['context'] : [],
+            tags: is_array($data['tags'] ?? null) ? array_values($data['tags']) : [],
+            pid: isset($data['pid']) ? (int) $data['pid'] : null,
+            hostname: isset($data['hostname']) ? (string) $data['hostname'] : null,
+        );
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function jsonSerialize(): array

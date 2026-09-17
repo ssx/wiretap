@@ -50,6 +50,22 @@ final readonly class Timings implements \JsonSerializable
     }
 
     /**
+     * @param array<string, mixed> $data
+     */
+    public static function fromArray(array $data): self
+    {
+        $int = static fn (string $k): ?int => isset($data[$k]) ? (int) $data[$k] : null;
+
+        return new self(
+            dns: $int('dns'),
+            connect: $int('connect'),
+            tls: $int('tls'),
+            ttfb: $int('ttfb'),
+            total: $int('total'),
+        );
+    }
+
+    /**
      * @return array<string, int>
      */
     public function jsonSerialize(): array
