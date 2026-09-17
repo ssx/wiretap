@@ -20,6 +20,8 @@ final class Correlation
 
     private static int $sequence = 0;
 
+    private static bool $explicit = false;
+
     /**
      * Adopt an inbound identifier, or generate one.
      *
@@ -29,6 +31,7 @@ final class Correlation
     public static function start(?string $inbound = null): string
     {
         self::$sequence = 0;
+        self::$explicit = true;
 
         return self::$id = self::normalise($inbound) ?? Ulid::generate();
     }
@@ -52,6 +55,21 @@ final class Correlation
     }
 
     /**
+     * Whether something deliberately started this correlation, as opposed to
+     * one being generated on demand by the first call to id().
+     *
+     * The difference decides ownership. A queue listener asking only
+     * hasStarted() could not tell "an HTTP request owns this scope" from "the
+     * capture middleware called id() on the first outbound call" — so in a
+     * worker, one HTTP call at boot meant no job ever got its own correlation
+     * again.
+     */
+    public static function startedExplicitly(): bool
+    {
+        return self::$explicit;
+    }
+
+    /**
      * Monotonic position of this call within the current correlation.
      */
     public static function nextSequence(): int
@@ -67,6 +85,7 @@ final class Correlation
     {
         self::$id = null;
         self::$sequence = 0;
+        self::$explicit = false;
     }
 
     private static function normalise(?string $inbound): ?string

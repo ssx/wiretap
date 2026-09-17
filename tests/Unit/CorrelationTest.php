@@ -69,3 +69,23 @@ it('reports whether a correlation is in scope without creating one', function ()
 
     expect(Correlation::hasStarted())->toBeFalse();
 });
+
+it('distinguishes a deliberately started correlation from a generated one', function (): void {
+    // hasStarted() alone cannot tell these apart, and the difference decides
+    // whether a queue job should take ownership of the scope.
+    expect(Correlation::startedExplicitly())->toBeFalse();
+
+    Correlation::id(); // generated on demand by the first outbound call
+
+    expect(Correlation::hasStarted())->toBeTrue()
+        ->and(Correlation::startedExplicitly())->toBeFalse();
+
+    Correlation::reset();
+    Correlation::start('deliberate');
+
+    expect(Correlation::startedExplicitly())->toBeTrue();
+
+    Correlation::reset();
+
+    expect(Correlation::startedExplicitly())->toBeFalse();
+});
