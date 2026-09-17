@@ -13,6 +13,9 @@ namespace Ssx\Wiretap;
  * end actually saw. So this keeps the wire order and does case-insensitive
  * lookup over it.
  */
+/**
+ * @implements \IteratorAggregate<int, array{0: string, 1: string}>
+ */
 final readonly class Headers implements \JsonSerializable, \Countable, \IteratorAggregate
 {
     /**
@@ -146,6 +149,9 @@ final readonly class Headers implements \JsonSerializable, \Countable, \Iterator
         return count($this->pairs);
     }
 
+    /**
+     * @return \Traversable<int, array{0: string, 1: string}>
+     */
     public function getIterator(): \Traversable
     {
         return new \ArrayIterator($this->pairs);
