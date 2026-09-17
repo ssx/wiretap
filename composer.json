@@ -1,0 +1,49 @@
+{
+    "name": "ssx/wiretap",
+    "description": "Capture outbound HTTP requests and responses in PHP, including calls made by code you cannot edit.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["http", "debugging", "logging", "curl", "guzzle", "observability"],
+    "authors": [
+        {
+            "name": "Scott Robinson",
+            "email": "scott@dor.ky"
+        }
+    ],
+    "require": {
+        "php": "^8.2"
+    },
+    "require-dev": {
+        "pestphp/pest": "^2.34",
+        "phpstan/phpstan": "^1.11",
+        "friendsofphp/php-cs-fixer": "^3.58"
+    },
+    "suggest": {
+        "psr/log": "To use Psr3Sink",
+        "ssx/wiretap-auto": "Zero-configuration capture of curl and Guzzle via ext-opentelemetry",
+        "ssx/wiretap-guzzle": "Guzzle middleware capture when the extension is unavailable"
+    },
+    "autoload": {
+        "psr-4": {
+            "Ssx\\Wiretap\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Ssx\\Wiretap\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "scripts": {
+        "test": "pest",
+        "stan": "phpstan analyse",
+        "fix": "php-cs-fixer fix"
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
