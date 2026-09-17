@@ -24,12 +24,44 @@ final readonly class EnvBlocklistProvider implements BlocklistProvider
             return [];
         }
 
+        return self::parse($raw);
+    }
+
+    /**
+     * Split a raw blocklist string into patterns.
+     *
+     * Public because framework integrations have to apply exactly these rules
+     * before their configuration is cached — Laravel's config:cache stops
+     * loading .env, so a bridge that parses the variable differently produces
+     * a different blocklist in production than in development.
+     *
+     * @return list<string>
+     */
+    public static function parse(string $raw): array
+    {
         return self::tokenise($raw);
     }
 
     public function name(): string
     {
         return 'env:' . $this->variable;
+    }
+
+    /**
+     * Whether the character about to be read is escaped.
+     *
+     * An odd number of trailing backslashes escapes it; an even number is a
+     * run of literal backslashes and does not.
+     */
+    private static function isEscaped(string $soFar): bool
+    {
+        $backslashes = 0;
+
+        for ($i = strlen($soFar) - 1; $i >= 0 && $soFar[$i] === '\\'; --$i) {
+            ++$backslashes;
+        }
+
+        return $backslashes % 2 === 1;
     }
 
     /**
@@ -52,8 +84,11 @@ final readonly class EnvBlocklistProvider implements BlocklistProvider
         for ($i = 0; $i < $length; ++$i) {
             $char = $raw[$i];
 
-            if ($char === '~') {
-                // A tilde opens a regex only at the start of a token.
+            if ($char === '~' && !self::isEscaped($current)) {
+                // A tilde opens a regex only at the start of a token, and an
+                // escaped one closes nothing: `~...\~user...~` is a single
+                // valid rule, and treating the middle tilde as the delimiter
+                // split it at the next comma and discarded it as invalid.
                 if (!$inRegex && trim($current) === '') {
                     $inRegex = true;
                 } elseif ($inRegex) {

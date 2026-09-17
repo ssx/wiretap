@@ -22,6 +22,12 @@ use Ssx\Wiretap\Contract\BlocklistProvider;
  */
 final class Blocklist
 {
+    /**
+     * Distinct hosts counted before the rest are aggregated. Diagnostics only
+     * ever show the top few, so a larger number would buy nothing.
+     */
+    private const MAX_COUNTED_HOSTS = 256;
+
     /** @var list<BlocklistProvider> */
     private array $providers = [];
 
@@ -68,6 +74,15 @@ final class Blocklist
             if ($pattern->matches($url)) {
                 $host = parse_url($url, PHP_URL_HOST);
                 $key = is_string($host) ? $host : '(unparseable)';
+
+                // Bounded. A worker checking unique hosts against a wildcard
+                // rule would otherwise retain one array entry per host for the
+                // life of the process — an unbounded structure inside the
+                // component whose job is to stop unbounded capture.
+                if (!isset($this->blockCounts[$key]) && count($this->blockCounts) >= self::MAX_COUNTED_HOSTS) {
+                    $key = '(other)';
+                }
+
                 $this->blockCounts[$key] = ($this->blockCounts[$key] ?? 0) + 1;
 
                 return true;
@@ -160,6 +175,14 @@ final class Blocklist
     public function blockCounts(): array
     {
         return $this->blockCounts;
+    }
+
+    /**
+     * Clear the counters. For a long-running worker that reports per job.
+     */
+    public function resetCounts(): void
+    {
+        $this->blockCounts = [];
     }
 
     /**

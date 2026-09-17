@@ -37,14 +37,33 @@ final class Regex
     }
 
     /**
+     * Replace, reporting whether the pattern actually ran.
+     *
+     * preg_replace_callback returns null on an execution failure — invalid
+     * UTF-8 in the subject, or a backtrack limit. Falling back to the original
+     * subject restored the very secret the pattern existed to remove, and the
+     * caller had no way to know. $ran lets the caller fail closed instead.
+     *
      * @param callable(array<int|string, string>): string $callback
      */
-    public static function replaceCallback(string $pattern, callable $callback, string $subject): string
+    public static function replaceCallback(string $pattern, callable $callback, string $subject, ?bool &$ran = null): string
     {
         if (!self::isValid($pattern)) {
+            $ran = false;
+
             return $subject;
         }
 
-        return preg_replace_callback($pattern, $callback, $subject) ?? $subject;
+        $result = preg_replace_callback($pattern, $callback, $subject);
+
+        if ($result === null) {
+            $ran = false;
+
+            return $subject;
+        }
+
+        $ran = true;
+
+        return $result;
     }
 }
