@@ -55,6 +55,74 @@ final class Patterns
      * Applied to every PAN candidate. This is the difference between a usable
      * rule and one that is disabled within a day.
      */
+    /**
+     * Find the valid card numbers inside a run of digits and separators.
+     *
+     * The greedy PAN regex matches the longest run it can, so
+     * `4111111111111111 123` matches as one 19-digit candidate whose Luhn
+     * check fails, and the valid card inside it is never reconsidered.
+     * Adjacent numeric fields are ordinary in a JSON payload.
+     *
+     * Candidates are built from whole separator-delimited groups rather than
+     * arbitrary substrings. That distinction matters: scanning every substring
+     * finds a 14-digit Luhn-valid sequence inside the perfectly ordinary order
+     * reference 1234567890123456, and redacting order references is how a
+     * redaction rule gets switched off. A real card number is written as whole
+     * groups — `4111 1111 1111 1111` — so whole groups are what we consider.
+     *
+     * @return list<string>
+     */
+    public static function findPans(string $candidate): array
+    {
+        if (self::passesLuhn($candidate)) {
+            return [$candidate];
+        }
+
+        // Keep each group's offset, so the value returned is an exact
+        // substring of the input. Rebuilding it with a chosen separator would
+        // produce text that str_replace cannot find when the original used a
+        // different one.
+        if (preg_match_all('/[0-9]+/', $candidate, $matches, PREG_OFFSET_CAPTURE) === false) {
+            return [];
+        }
+
+        /** @var list<array{0: string, 1: int}> $groups */
+        $groups = $matches[0];
+        $count = count($groups);
+
+        if ($count < 2) {
+            // A single unbroken run that already failed Luhn. Splitting it
+            // further would be inventing a card number that was never written.
+            return [];
+        }
+
+        // Longest spans first, so the fullest card wins over a shorter valid
+        // sequence inside it.
+        for ($length = $count; $length >= 1; --$length) {
+            for ($offset = 0; $offset + $length <= $count; ++$offset) {
+                $slice = array_slice($groups, $offset, $length);
+                $first = $slice[0];
+                $last = $slice[$length - 1];
+
+                $startPos = $first[1];
+                $endPos = $last[1] + strlen($last[0]);
+                $text = substr($candidate, $startPos, $endPos - $startPos);
+
+                // Only separators may sit between the groups, or this is not
+                // one number written with separators.
+                if (preg_match('/^[0-9]+(?:[ -][0-9]+)*$/', $text) !== 1) {
+                    continue;
+                }
+
+                if (self::passesLuhn($text)) {
+                    return [$text];
+                }
+            }
+        }
+
+        return [];
+    }
+
     public static function passesLuhn(string $candidate): bool
     {
         $digits = preg_replace('/[^0-9]/', '', $candidate) ?? '';

@@ -97,6 +97,11 @@ final readonly class Exchange implements \JsonSerializable
         return $this->with(uri: $uri);
     }
 
+    public function withError(?TransferError $error): self
+    {
+        return $this->with(error: $error);
+    }
+
     /**
      * @param array<string, scalar|null> $context
      */
@@ -120,7 +125,7 @@ final readonly class Exchange implements \JsonSerializable
             responseHeaders: $overrides['responseHeaders'] ?? $this->responseHeaders,
             responseBody: $overrides['responseBody'] ?? $this->responseBody,
             timings: $overrides['timings'] ?? $this->timings,
-            error: $overrides['error'] ?? $this->error,
+            error: array_key_exists('error', $overrides) ? $overrides['error'] : $this->error,
             startedAt: $overrides['startedAt'] ?? $this->startedAt,
             parentExchangeId: $overrides['parentExchangeId'] ?? $this->parentExchangeId,
             sequence: $overrides['sequence'] ?? $this->sequence,

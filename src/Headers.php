@@ -72,10 +72,19 @@ final readonly class Headers implements \JsonSerializable, \Countable, \Iterator
                 continue;
             }
 
+            // A request line in absolute form — `GET https://host/?token=x
+            // HTTP/1.1`, which is what proxies see — contains a colon and
+            // would otherwise parse as a header named "GET https" whose value
+            // is an unredacted URL. Status lines have the same shape.
+            if (self::isMessageLine($line)) {
+                continue;
+            }
+
             [$name, $value] = explode(':', $line, 2);
             $name = trim($name);
 
-            if ($name === '') {
+            // A header name is a token: no spaces, no control characters.
+            if ($name === '' || preg_match('/^[!#$%&\'*+\-.^_`|~0-9A-Za-z]+$/', $name) !== 1) {
                 continue;
             }
 
@@ -83,6 +92,12 @@ final readonly class Headers implements \JsonSerializable, \Countable, \Iterator
         }
 
         return new self($pairs);
+    }
+
+    private static function isMessageLine(string $line): bool
+    {
+        return preg_match('~^HTTP/\d~i', $line) === 1
+            || preg_match('~^[A-Z]+\s+\S+\s+HTTP/\d~', $line) === 1;
     }
 
     /**

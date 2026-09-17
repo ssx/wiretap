@@ -7,6 +7,7 @@ namespace Ssx\Wiretap\Redaction;
 use Ssx\Wiretap\CapturedBody;
 use Ssx\Wiretap\Exchange;
 use Ssx\Wiretap\Headers;
+use Ssx\Wiretap\TransferError;
 use Ssx\Wiretap\Support\Regex;
 
 /**
@@ -47,12 +48,20 @@ final readonly class Redactor
         // where no structural rule is looking for it.
         $known = new KnownSecrets($this->config->minEchoedSecretLength);
 
-        return $exchange
+        $redacted = $exchange
             ->withUri($this->redactUrl($exchange->uri, $known))
             ->withRequestHeaders($this->redactHeaders($exchange->requestHeaders, $known))
             ->withResponseHeaders($this->redactHeaders($exchange->responseHeaders, $known))
             ->withRequestBody($this->redactBody($exchange->requestBody, $known))
             ->withResponseBody($this->redactBody($exchange->responseBody, $known));
+
+        // Free text that is persisted like anything else. A Guzzle
+        // RequestException message embeds the full request URI, so an
+        // exception carried a credential straight past the URL redaction that
+        // had just removed it.
+        return $redacted
+            ->withError($this->redactError($redacted->error, $known))
+            ->withContext($this->redactContext($redacted->context, $known));
     }
 
     /**
@@ -99,21 +108,51 @@ final readonly class Redactor
     private function redactQueryParams(array $params, ?KnownSecrets $known = null): array
     {
         foreach ($params as $name => $value) {
-            if (is_array($value)) {
-                /** @var array<array-key, mixed> $value */
-                $params[$name] = $this->redactQueryParams($value, $known);
+            // Sensitivity is decided before recursing. Checking the leaf only
+            // meant `?token[]=secret` recursed into an array whose keys are
+            // 0, 1, 2 — none of which is a sensitive name — and the value
+            // survived untouched.
+            if ($this->isSensitiveQueryParam((string) $name)) {
+                $params[$name] = is_array($value)
+                    ? $this->redactEverything($value, $known)
+                    : $this->redactLeaf($value, $known);
 
                 continue;
             }
 
-            if ($this->isSensitiveQueryParam((string) $name)) {
-                $original = is_scalar($value) ? (string) $value : '';
-                $known?->remember($original);
-                $params[$name] = $this->replacementFor($original);
+            if (is_array($value)) {
+                /** @var array<array-key, mixed> $value */
+                $params[$name] = $this->redactQueryParams($value, $known);
             }
         }
 
         return $params;
+    }
+
+    /**
+     * Every leaf beneath a sensitive parameter is itself sensitive.
+     *
+     * @param array<array-key, mixed> $values
+     *
+     * @return array<array-key, mixed>
+     */
+    private function redactEverything(array $values, ?KnownSecrets $known = null): array
+    {
+        foreach ($values as $key => $value) {
+            $values[$key] = is_array($value)
+                ? $this->redactEverything($value, $known)
+                : $this->redactLeaf($value, $known);
+        }
+
+        return $values;
+    }
+
+    private function redactLeaf(mixed $value, ?KnownSecrets $known = null): string
+    {
+        $original = is_scalar($value) ? (string) $value : '';
+        $known?->remember($original);
+
+        return $this->replacementFor($original);
     }
 
     private function isSensitiveQueryParam(string $name): bool
@@ -166,18 +205,40 @@ final readonly class Redactor
             if ($this->isSensitiveHeader($name)) {
                 $known?->remember($value);
                 $known?->rememberCredentialValue($value);
+                $known?->rememberCookieValues($value);
 
                 return $this->replacementFor($value);
             }
 
-            // Long header values are almost always tokens or serialised
-            // state. Cap them before they reach the store.
+            // A header that carries a URL carries everything in its query
+            // string. `Location: https://host/?token=...` survived untouched
+            // while the same token was being stripped from the exchange URI.
+            if ($this->isUrlHeader($name)) {
+                $value = $this->redactUrl($value, $known);
+            }
+
+            $value = $this->applyPatterns($value);
+
+            // Truncation is last. Cutting first destroyed the evidence the
+            // detectors need: a header ending in a card number kept its
+            // leading digits and lost the rest, leaving a fragment nothing
+            // would ever match again.
             if (strlen($value) > $this->config->maxHeaderValueBytes) {
                 $value = substr($value, 0, $this->config->maxHeaderValueBytes) . '…[truncated]';
             }
 
-            return $this->applyPatterns($value);
+            return $value;
         });
+    }
+
+    private function isUrlHeader(string $name): bool
+    {
+        return in_array(strtolower($name), [
+            'location',
+            'content-location',
+            'referer',
+            'refresh',
+        ], true);
     }
 
     private function isSensitiveHeader(string $name): bool
@@ -196,6 +257,59 @@ final readonly class Redactor
         return $this->config->headerMode === RedactionConfig::MODE_ALLOW
             ? !$listed
             : $listed;
+    }
+
+    /**
+     * Exception messages routinely embed the request URI, and therefore its
+     * query string. Redacting the URI while persisting the message verbatim
+     * put the credential straight back in the record.
+     */
+    private function redactError(?TransferError $error, KnownSecrets $known): ?TransferError
+    {
+        if ($error === null) {
+            return null;
+        }
+
+        $message = $this->redactUrlsIn($error->message, $known);
+        $message = $this->applyPatterns($message);
+        $message = $known->scrub($message, $this->config->replacement);
+
+        return new TransferError($error->errno, $message, $error->class);
+    }
+
+    /**
+     * Context is supplied by framework integrations and can contain a route
+     * path with a secret in it — a password-reset token, for instance.
+     *
+     * @param array<string, scalar|null> $context
+     *
+     * @return array<string, scalar|null>
+     */
+    private function redactContext(array $context, KnownSecrets $known): array
+    {
+        foreach ($context as $key => $value) {
+            if (!is_string($value) || $value === '') {
+                continue;
+            }
+
+            $clean = $this->redactUrlsIn($value, $known);
+            $clean = $this->applyPatterns($clean);
+            $context[$key] = $known->scrub($clean, $this->config->replacement);
+        }
+
+        return $context;
+    }
+
+    /**
+     * Rewrite any absolute URL embedded in free text.
+     */
+    private function redactUrlsIn(string $text, ?KnownSecrets $known = null): string
+    {
+        return Regex::replaceCallback(
+            '~https?://[^\s\'"<>]+~i',
+            fn (array $m): string => $this->redactUrl($m[0], $known),
+            $text,
+        );
     }
 
     /**
@@ -220,8 +334,27 @@ final readonly class Redactor
         $bytes = (string) $body->bytes;
 
         // Layer 4, then 5, then the echoed-value sweep.
-        $bytes = $this->redactStructured($bytes, $body->contentType);
-        $bytes = $this->applyPatterns($bytes);
+        $structured = $this->redactStructured($bytes, $body->contentType, $inspected);
+
+        // The most important rule here. If structural rules are configured and
+        // the body could not be parsed to apply them, the body is dropped
+        // rather than stored.
+        //
+        // The failing case is not exotic: a capture layer truncates a large
+        // JSON payload, the prefix no longer parses, structural redaction
+        // silently does nothing, and a password sitting in the first hundred
+        // bytes is written out in full. The regex detectors do not save you —
+        // an ordinary password matches none of them.
+        if (!$inspected && $this->config->bodyPaths !== [] && $this->config->omitUninspectableBodies) {
+            return CapturedBody::omitted(
+                CapturedBody::OMITTED_REDACTED,
+                $body->size,
+                $body->contentType,
+                $body->sha256,
+            );
+        }
+
+        $bytes = $this->applyPatterns($structured);
 
         if ($known !== null) {
             $bytes = $known->scrub($bytes, $this->config->replacement);
@@ -255,17 +388,21 @@ final readonly class Redactor
      * never regex over the raw text — a regex cannot tell a key from a value
      * and will happily redact the wrong half.
      */
-    private function redactStructured(string $bytes, ?string $contentType): string
+    private function redactStructured(string $bytes, ?string $contentType, ?bool &$inspected = null): string
     {
         if ($this->config->bodyPaths === []) {
+            $inspected = true;
+
             return $bytes;
         }
 
+        $inspected = false;
         $type = strtolower(explode(';', $contentType ?? '')[0]);
 
         if (str_contains($type, 'x-www-form-urlencoded')) {
             parse_str($bytes, $form);
             $form = $this->redactPaths($form, $this->config->bodyPaths);
+            $inspected = true;
 
             return http_build_query($form, '', '&', PHP_QUERY_RFC3986);
         }
@@ -273,16 +410,21 @@ final readonly class Redactor
         $decoded = json_decode($bytes, true);
 
         if (!is_array($decoded)) {
-            // Not JSON, or malformed, or a truncated prefix. Fall through to
-            // the regex layer rather than persisting a raw prefix we could
-            // not inspect structurally.
+            // Not JSON, malformed, or a truncated prefix. The caller decides
+            // what to do; it must not be treated as successfully inspected.
             return $bytes;
         }
 
         $redacted = $this->redactPaths($decoded, $this->config->bodyPaths);
         $encoded = json_encode($redacted, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
-        return $encoded === false ? $bytes : $encoded;
+        if ($encoded === false) {
+            return $bytes;
+        }
+
+        $inspected = true;
+
+        return $encoded;
     }
 
     /**
@@ -375,14 +517,56 @@ final readonly class Redactor
     {
         return preg_replace_callback(
             Patterns::PAN,
-            fn (array $m): string => Patterns::passesLuhn($m[0])
-                ? $this->replacementFor($m[0])
-                : $m[0],
+            function (array $m): string {
+                $found = Patterns::findPans($m[0]);
+
+                if ($found === []) {
+                    return $m[0];
+                }
+
+                // Replace only the card inside the match, so an adjacent
+                // numeric field alongside it survives.
+                return str_replace($found[0], $this->replacementFor($found[0]), $m[0]);
+            },
             $value,
         ) ?? $value;
     }
 
     private function containsLikelySecret(string $value): bool
+    {
+        // Scan the decoded form too. JSON escaping hides a card number as
+        // \u0031 digits and a token as abc\/def, neither of which the
+        // detectors match against the raw serialised text.
+        $decoded = json_decode($value, true);
+
+        if (is_array($decoded)) {
+            $flat = $this->flattenToText($decoded);
+
+            if ($flat !== '' && $this->scanForSecrets($flat)) {
+                return true;
+            }
+        }
+
+        return $this->scanForSecrets($value);
+    }
+
+    /**
+     * @param array<array-key, mixed> $data
+     */
+    private function flattenToText(array $data): string
+    {
+        $parts = [];
+
+        array_walk_recursive($data, static function (mixed $value) use (&$parts): void {
+            if (is_scalar($value)) {
+                $parts[] = (string) $value;
+            }
+        });
+
+        return implode("\n", $parts);
+    }
+
+    private function scanForSecrets(string $value): bool
     {
         foreach ([Patterns::BEARER, Patterns::JWT, Patterns::AWS_KEY, Patterns::STRIPE_KEY] as $regex) {
             if (preg_match($regex, $value) === 1) {
@@ -392,7 +576,7 @@ final readonly class Redactor
 
         if (preg_match_all(Patterns::PAN, $value, $matches) > 0) {
             foreach ($matches[0] as $candidate) {
-                if (Patterns::passesLuhn($candidate)) {
+                if (Patterns::findPans($candidate) !== []) {
                     return true;
                 }
             }
