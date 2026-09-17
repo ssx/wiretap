@@ -7,6 +7,7 @@ namespace Ssx\Wiretap\Export;
 use Ssx\Wiretap\CapturedBody;
 use Ssx\Wiretap\Exchange;
 use Ssx\Wiretap\Headers;
+use Ssx\Wiretap\Support\QueryString;
 
 /**
  * Exports exchanges as HAR 1.2.
@@ -198,14 +199,15 @@ final readonly class HarExporter
             return [];
         }
 
-        parse_str($query, $params);
-
         $out = [];
 
-        foreach ($params as $name => $value) {
-            foreach ((array) $value as $single) {
-                $out[] = ['name' => (string) $name, 'value' => is_scalar($single) ? (string) $single : ''];
-            }
+        // HAR's queryString is a list of name/value pairs and represents
+        // repeats natively, so parse_str's array folding bought nothing here
+        // and cost a value every time a name was repeated. It also rewrote
+        // `.` and space in names to `_`, exporting parameters the server
+        // never received.
+        foreach (QueryString::parse($query) as [$name, $value]) {
+            $out[] = ['name' => $name, 'value' => $value ?? ''];
         }
 
         return $out;
