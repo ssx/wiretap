@@ -106,7 +106,7 @@ final class Recorder
 
     private function buffer(Exchange $exchange): void
     {
-        $size = strlen((string) json_encode($exchange));
+        $size = $this->serialisedSize($exchange);
 
         if (count($this->buffer) >= $this->maxBufferedRecords
             || $this->bufferedBytes + $size > $this->maxBufferedBytes) {
@@ -125,6 +125,31 @@ final class Recorder
         $this->bufferedBytes += $size;
 
         $this->registerShutdownFlush();
+    }
+
+    /**
+     * The record's size in bytes, as the sink will write it.
+     *
+     * json_encode() returns false on invalid UTF-8, and casting that to a
+     * string yields size zero — so a body the encoder choked on counted for
+     * nothing against the buffer's byte limit. A 1,001-byte record was
+     * retained with an 8 MiB cap set to 100. The sink writes with
+     * JSON_INVALID_UTF8_SUBSTITUTE, so the estimate uses the same flags.
+     */
+    private function serialisedSize(Exchange $exchange): int
+    {
+        $encoded = json_encode(
+            $exchange,
+            JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE,
+        );
+
+        if (is_string($encoded)) {
+            return strlen($encoded);
+        }
+
+        // Still unencodable. Charge it the whole remaining budget rather than
+        // nothing, so it cannot slip past the cap.
+        return $this->maxBufferedBytes;
     }
 
     public function flush(): void
@@ -165,8 +190,16 @@ final class Recorder
 
         $this->shutdownRegistered = true;
 
-        register_shutdown_function(function (): void {
-            $this->flush();
+        // A weak reference, so a recorder that has been replaced — by
+        // Wiretap::fake(), or by a framework booting a second application —
+        // can be collected. Capturing $this strongly kept every retired
+        // recorder and its in-memory captures alive until the process exited,
+        // which in a test suite calling fake() per test is an accumulating
+        // leak.
+        $weak = \WeakReference::create($this);
+
+        register_shutdown_function(static function () use ($weak): void {
+            $weak->get()?->flush();
         });
     }
 
