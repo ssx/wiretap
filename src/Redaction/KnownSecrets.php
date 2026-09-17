@@ -39,12 +39,12 @@ final class KnownSecrets
 
         $this->values[$value] = true;
 
-        // A URL-encoded form of the same value appears in query strings and
-        // form bodies, and would otherwise slip through.
-        $encoded = rawurlencode($value);
-
-        if ($encoded !== $value && strlen($encoded) >= $this->minLength) {
-            $this->values[$encoded] = true;
+        // The same value appears in other encodings depending on where it is
+        // echoed back, and a literal comparison misses every one of them.
+        foreach ($this->encodingsOf($value) as $variant) {
+            if ($variant !== $value && strlen($variant) >= $this->minLength) {
+                $this->values[$variant] = true;
+            }
         }
     }
 
@@ -93,6 +93,29 @@ final class KnownSecrets
                 $this->remember(trim($parts[1], " \t\"'"));
             }
         }
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function encodingsOf(string $value): array
+    {
+        $variants = [rawurlencode($value), urlencode($value)];
+
+        // JSON escaping is the one that bit us: a token containing a slash is
+        // written as abc\/def inside a serialised body, so scrubbing the raw
+        // form found nothing. Trimming the quotes json_encode adds leaves the
+        // escaped body text.
+        $json = json_encode($value);
+
+        if (is_string($json) && strlen($json) > 2) {
+            $variants[] = substr($json, 1, -1);
+        }
+
+        return array_values(array_unique(array_filter(
+            $variants,
+            static fn (string $v): bool => $v !== '',
+        )));
     }
 
     public function scrub(string $subject, string $replacement): string

@@ -106,11 +106,15 @@ describe('the collector', function (): void {
         expect($secrets->isEmpty())->toBeTrue();
     });
 
-    it('stores both raw and url-encoded forms', function (): void {
+    it('stores the encodings a secret can be echoed back in', function (): void {
         $secrets = new KnownSecrets(minLength: 4);
         $secrets->remember('a b c d');
 
-        expect($secrets->count())->toBe(2);
+        // The raw form plus at least one encoded variant. The exact count is
+        // not the contract; recognising the value wherever it reappears is.
+        expect($secrets->count())->toBeGreaterThan(1)
+            ->and($secrets->scrub('a b c d', '[R]'))->toBe('[R]')
+            ->and($secrets->scrub(rawurlencode('a b c d'), '[R]'))->toBe('[R]');
     });
 
     it('leaves the subject alone when it knows nothing', function (): void {

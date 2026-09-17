@@ -61,7 +61,11 @@ final readonly class Redactor
         // had just removed it.
         return $redacted
             ->withError($this->redactError($redacted->error, $known))
-            ->withContext($this->redactContext($redacted->context, $known));
+            ->withContext($this->redactContext($redacted->context, $known))
+            // Free text like everything above. A reason phrase is server-
+            // controlled, and tags are supplied by integrations.
+            ->withReason($redacted->reason === null ? null : $this->redactText($redacted->reason, $known))
+            ->withTags(array_map(fn (string $t): string => $this->redactText($t, $known), $redacted->tags));
     }
 
     /**
@@ -270,11 +274,7 @@ final readonly class Redactor
             return null;
         }
 
-        $message = $this->redactUrlsIn($error->message, $known);
-        $message = $this->applyPatterns($message);
-        $message = $known->scrub($message, $this->config->replacement);
-
-        return new TransferError($error->errno, $message, $error->class);
+        return new TransferError($error->errno, $this->redactText($error->message, $known), $error->class);
     }
 
     /**
@@ -292,12 +292,42 @@ final readonly class Redactor
                 continue;
             }
 
-            $clean = $this->redactUrlsIn($value, $known);
-            $clean = $this->applyPatterns($clean);
-            $context[$key] = $known->scrub($clean, $this->config->replacement);
+            $context[$key] = $this->redactText($value, $known);
         }
 
         return $context;
+    }
+
+    /**
+     * Custom patterns that will never match because they do not compile.
+     *
+     * Surfaced so `wiretap doctor` can say so out loud rather than leaving
+     * someone to believe a rule is running.
+     *
+     * @return list<string>
+     */
+    public function invalidPatterns(): array
+    {
+        $invalid = [];
+
+        foreach ($this->config->custom as $regex) {
+            if (!Regex::isValid($regex)) {
+                $invalid[] = $regex;
+            }
+        }
+
+        return $invalid;
+    }
+
+    /**
+     * Run the free-text layers over a persisted string field.
+     */
+    private function redactText(string $text, KnownSecrets $known): string
+    {
+        $clean = $this->redactUrlsIn($text, $known);
+        $clean = $this->applyPatterns($clean);
+
+        return $known->scrub($clean, $this->config->replacement);
     }
 
     /**
@@ -345,6 +375,19 @@ final readonly class Redactor
         // silently does nothing, and a password sitting in the first hundred
         // bytes is written out in full. The regex detectors do not save you —
         // an ordinary password matches none of them.
+        // A broken custom pattern means a configured rule did not run. Treat
+        // that exactly like a body whose structural rules could not be
+        // applied: drop it rather than store something an intended rule never
+        // examined.
+        if ($this->invalidPatterns() !== [] && $this->config->omitUninspectableBodies) {
+            return CapturedBody::omitted(
+                CapturedBody::OMITTED_REDACTED,
+                $body->size,
+                $body->contentType,
+                $body->sha256,
+            );
+        }
+
         if (!$inspected && $this->config->bodyPaths !== [] && $this->config->omitUninspectableBodies) {
             return CapturedBody::omitted(
                 CapturedBody::OMITTED_REDACTED,
@@ -499,6 +542,14 @@ final readonly class Redactor
         }
 
         foreach ($this->config->custom as $regex) {
+            if (!Regex::isValid($regex)) {
+                // Counted, not silently skipped. A rule someone believes is
+                // protecting them and quietly is not is the worst outcome
+                // available here, so bodies are treated as uninspectable while
+                // any custom pattern is broken.
+                continue;
+            }
+
             $value = Regex::replaceCallback(
                 $regex,
                 fn (array $m): string => $this->replacementFor($m[0]),
