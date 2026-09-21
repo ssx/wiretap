@@ -14,16 +14,25 @@ add one of the capture packages:
 
 | Package | Captures | Requires |
 | --- | --- | --- |
-| [`ssx/wiretap-auto`](https://github.com/ssx/wiretap-auto) | **synchronous** curl and Guzzle, including vendor code, with no application changes | `ext-opentelemetry` |
+| [`ssx/wiretap-auto`](https://github.com/ssx/wiretap-auto) | all curl and Guzzle traffic, sync and async, including vendor code, with no application changes | `ext-opentelemetry` |
 | [`ssx/wiretap-guzzle`](https://github.com/ssx/wiretap-guzzle) | Guzzle clients you construct — sync, async and pools | — |
 | [`ssx/wiretap-symfony`](https://github.com/ssx/wiretap-symfony) | Symfony HttpClient | — |
 
-`ssx/wiretap-auto` hooks `curl_exec` and **not** `curl_multi_*`, so async
-Guzzle (`getAsync()`, `Pool`) and Symfony's `CurlHttpClient` are not captured
-by it. Guzzle's default handler only reaches `curl_exec` on its synchronous
-branch. If you own the client, the bridge packages cover async properly; the
-gap is vendor code you cannot edit making async calls. See that package's
-README.
+`ssx/wiretap-auto` hooks both `curl_exec` and `curl_multi_*` as of v0.0.6,
+which is what makes async coverage possible: Guzzle's default handler is
+`Proxy::wrapSync(CurlMultiHandler, CurlHandler)`, so `getAsync()`, `Pool` and
+every concurrent batch go through the multi interface and never touch
+`curl_exec`, and Symfony's `CurlHttpClient` is multi-only and never calls it
+at all.
+
+One caveat worth knowing before you pick a package: Guzzle streams responses
+through `CURLOPT_WRITEFUNCTION`, so there is no returned string for the hooks
+to read and those records carry `omitted_reason: streaming` instead of a
+response body. That applies to Guzzle's synchronous path too — it is a
+property of how Guzzle reads responses, not of async. Request bodies, headers,
+status and timings are all recorded normally. If you need response bodies from
+a client you own, use the bridge package for it; `ssx/wiretap-auto` is for
+traffic you cannot reach.
 
 ## ⚠️ This is a debugging tool, not a logging product
 
