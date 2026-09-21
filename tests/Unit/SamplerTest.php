@@ -54,24 +54,41 @@ describe('the sampling key', function (): void {
     });
 
     it('makes that computation useless once a salt is set', function (): void {
+        // Stated as the property, not as one outcome. A single id proves
+        // little: at a 1% rate the salted key lands in the sampled-in bucket
+        // 1% of the time by chance, so an assertion on one id is a coin that
+        // usually comes up the way you wanted. The sibling test in
+        // ssx/wiretap-laravel was written that way and failed on CI once the
+        // salt was a per-run value.
         $rate = 100;
         $salted = new Sampler(
             rateBasisPoints: $rate,
             alwaysKeepFailures: false,
             samplingSalt: 'per-install-secret',
         );
+        $unsalted = new Sampler(rateBasisPoints: $rate, alwaysKeepFailures: false);
 
-        $chosen = null;
+        $chosen = [];
 
-        for ($i = 0; $i < 100_000; ++$i) {
+        for ($i = 0; count($chosen) < 200 && $i < 1_000_000; ++$i) {
             if ((crc32("chosen-{$i}") % 10000) < $rate) {
-                $chosen = "chosen-{$i}";
-
-                break;
+                $chosen[] = "chosen-{$i}";
             }
         }
 
-        expect($salted->shouldKeep(sampled((string) $chosen)))->toBeFalse();
+        $unsaltedKept = 0;
+        $saltedKept = 0;
+
+        foreach ($chosen as $id) {
+            $unsaltedKept += $unsalted->shouldKeep(sampled($id)) ? 1 : 0;
+            $saltedKept += $salted->shouldKeep(sampled($id)) ? 1 : 0;
+        }
+
+        // Every one, by construction — offline computation is exactly right
+        // without a salt.
+        expect($unsaltedKept)->toBe(200)
+            // And worth no more than chance with one. ~2 expected at 1%.
+            ->and($saltedKept)->toBeLessThan(40);
     });
 
     it('stays deterministic for one id, which is what keeps a trace whole', function (): void {
