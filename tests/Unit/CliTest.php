@@ -35,6 +35,34 @@ describe('argv parsing', function (): void {
     it('falls back to the default for a non-numeric integer option', function (): void {
         expect(Input::fromArgv(['--limit=abc'])->integer('limit', 20))->toBe(20);
     });
+
+    it('treats everything after a bare -- as positional', function (): void {
+        // A correlation id beginning with a dash could not be passed at all:
+        // it was read as a short option cluster, and the command reported
+        // "Which correlation?" for an argument that had been supplied.
+        // Correlation ids come from inbound headers and a leading dash
+        // survives normalisation, so this is reachable.
+        $input = Input::fromArgv(['trace', '--limit=5', '--', '-abc']);
+
+        expect($input->argument(0))->toBe('trace')
+            ->and($input->argument(1))->toBe('-abc')
+            ->and($input->integer('limit', 20))->toBe(5);
+    });
+
+    it('stops reading options at the separator', function (): void {
+        $input = Input::fromArgv(['show', '--', '--not-an-option']);
+
+        expect($input->argument(1))->toBe('--not-an-option')
+            ->and($input->flag('not-an-option'))->toBeFalse();
+    });
+
+    it('leaves ordinary parsing alone when there is no separator', function (): void {
+        $input = Input::fromArgv(['list', '--failed', '--host', 'api.example.com']);
+
+        expect($input->arguments)->toBe(['list'])
+            ->and($input->flag('failed'))->toBeTrue()
+            ->and($input->option('host'))->toBe('api.example.com');
+    });
 });
 
 describe('reading records back', function (): void {
