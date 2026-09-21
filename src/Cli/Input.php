@@ -11,8 +11,9 @@ namespace Ssx\Wiretap\Cli;
  * is that it requires nothing but PHP, and pulling in a console component so
  * that six commands can parse `--host=` would spend that for very little.
  *
- * Supports `--flag`, `--key=value`, `--key value`, `-abc` short clusters, and
- * positional arguments.
+ * Supports `--flag`, `--key=value`, `--key value`, `-abc` short clusters,
+ * positional arguments, and a bare `--` after which everything is
+ * positional.
  */
 final readonly class Input
 {
@@ -58,8 +59,30 @@ final readonly class Input
         $options = [];
         $count = count($argv);
 
+        $positionalOnly = false;
+
         for ($i = 0; $i < $count; ++$i) {
             $token = $argv[$i];
+
+            // Everything after a bare `--` is a positional argument.
+            //
+            // Without it a value that begins with a dash could not be passed
+            // at all: `wiretap trace -abc` read the id as a short option
+            // cluster and reported "Which correlation?" for an argument that
+            // had been supplied. Correlation ids come from inbound headers,
+            // and core accepts a leading dash when it normalises one, so this
+            // is reachable rather than theoretical.
+            if ($token === '--') {
+                $positionalOnly = true;
+
+                continue;
+            }
+
+            if ($positionalOnly) {
+                $arguments[] = $token;
+
+                continue;
+            }
 
             if (str_starts_with($token, '--')) {
                 $name = substr($token, 2);
