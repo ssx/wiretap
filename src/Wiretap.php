@@ -300,9 +300,25 @@ final class Wiretap
             )),
             sampler: new Sampler(
                 rateBasisPoints: self::intFromEnv('WIRETAP_SAMPLE_BP', 10000),
+                // Optional, and only meaningful below 100% sampling. Without
+                // it the decision is a pure function of the correlation id,
+                // which the framework bridges adopt from an inbound header —
+                // so a caller can compute an id that keeps their own traffic
+                // out of the capture. See Sampler::sampledIn().
+                samplingSalt: self::stringFromEnv('WIRETAP_SAMPLE_SALT'),
             ),
             enabled: $enabled,
         );
+    }
+
+    /**
+     * Read a non-empty string from the environment, or null.
+     */
+    private static function stringFromEnv(string $name): ?string
+    {
+        $value = getenv($name);
+
+        return is_string($value) && trim($value) !== '' ? $value : null;
     }
 
     /**
