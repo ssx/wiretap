@@ -134,8 +134,7 @@ final class Recorder
     {
         $size = $this->serialisedSize($exchange);
 
-        if (count($this->buffer) >= $this->maxBufferedRecords
-            || $this->bufferedBytes + $size > $this->maxBufferedBytes) {
+        if ($this->bufferedBytes + $size > $this->maxBufferedBytes) {
             // Flush rather than drop where we can; a long-running worker never
             // reaches shutdown, so thresholds are the only flush it will get.
             $this->flush();
@@ -151,6 +150,15 @@ final class Recorder
         $this->bufferedBytes += $size;
 
         $this->registerShutdownFlush();
+
+        // The record threshold is checked after appending. Checking before
+        // meant the record that reached it waited for the next one to push it
+        // out, so a threshold of one still held every record back by one —
+        // and the last record of a process that never reaches shutdown was
+        // never written at all.
+        if (count($this->buffer) >= $this->maxBufferedRecords) {
+            $this->flush();
+        }
     }
 
     /**

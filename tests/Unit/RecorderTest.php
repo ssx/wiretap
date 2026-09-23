@@ -157,14 +157,82 @@ describe('buffering', function (): void {
         $sink = new InMemorySink();
         $recorder = new Recorder(sink: $sink, maxBufferedRecords: 3);
 
-        foreach (range(1, 3) as $i) {
+        foreach (range(1, 2) as $i) {
             $recorder->record(exchange(uri: "https://api.example.com/v1/orders/{$i}"));
         }
 
-        // The fourth record triggers the flush of the first three.
-        $recorder->record(exchange(uri: 'https://api.example.com/v1/orders/4'));
+        expect($sink->all())->toHaveCount(0);
 
-        expect($sink->all())->toHaveCount(3);
+        // The third record reaches the threshold and is written with the
+        // first two, rather than waiting for a fourth to push it out.
+        $recorder->record(exchange(uri: 'https://api.example.com/v1/orders/3'));
+
+        expect($sink->all())->toHaveCount(3)
+            ->and($recorder->buffered())->toBe([]);
+    });
+
+    it('writes every record as it is recorded when the threshold is one', function (): void {
+        $sink = new class implements ExchangeSink {
+            public int $batches = 0;
+
+            /** @var list<Exchange> */
+            public array $written = [];
+
+            public function write(Exchange $exchange): void
+            {
+                $this->writeBatch([$exchange]);
+            }
+
+            public function writeBatch(iterable $exchanges): void
+            {
+                ++$this->batches;
+
+                foreach ($exchanges as $exchange) {
+                    $this->written[] = $exchange;
+                }
+            }
+        };
+
+        $recorder = new Recorder(sink: $sink, maxBufferedRecords: 1);
+
+        $recorder->record(exchange(uri: 'https://api.example.com/v1/orders/1'));
+
+        // Written immediately, not held until the next record arrives.
+        expect($sink->written)->toHaveCount(1)
+            ->and($recorder->buffered())->toBe([]);
+
+        $recorder->record(exchange(uri: 'https://api.example.com/v1/orders/2'));
+        $recorder->flush();
+
+        // One write per record, and the explicit flush has nothing to add.
+        expect($sink->written)->toHaveCount(2)
+            ->and($sink->batches)->toBe(2);
+    });
+
+    it('still swallows a failing sink when the threshold flushes', function (): void {
+        $sink = new class implements ExchangeSink {
+            public int $attempts = 0;
+
+            public function write(Exchange $exchange): void
+            {
+                $this->writeBatch([$exchange]);
+            }
+
+            public function writeBatch(iterable $exchanges): void
+            {
+                ++$this->attempts;
+
+                throw new RuntimeException('disk full');
+            }
+        };
+
+        $recorder = new Recorder(sink: $sink, maxBufferedRecords: 1);
+
+        $recorder->record(exchange());
+        $recorder->record(exchange());
+
+        expect($sink->attempts)->toBe(2)
+            ->and($recorder->buffered())->toBe([]);
     });
 
     it('bounds total buffered bytes rather than growing without limit', function (): void {
