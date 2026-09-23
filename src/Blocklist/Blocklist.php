@@ -43,6 +43,11 @@ final class Blocklist
     private bool $failedClosed = false;
 
     /**
+     * Set while the providers are being read.
+     */
+    private bool $compiling = false;
+
+    /**
      * When the failed-closed compile happened, so it can be retried.
      */
     private ?int $failedAt = null;
@@ -92,6 +97,15 @@ final class Blocklist
      */
     public function blocks(string $url): bool
     {
+        // A provider that loads its rules over HTTP makes that request through
+        // the very hooks that ask this question, so the check arrives here
+        // again while the first compile is still running — and compiles again,
+        // and again, until memory runs out. The rules are not known yet, so
+        // the nested request is not captured.
+        if ($this->compiling) {
+            return true;
+        }
+
         foreach ($this->patterns() as $pattern) {
             if ($pattern->matches($url)) {
                 $host = parse_url($url, PHP_URL_HOST);
@@ -133,7 +147,21 @@ final class Blocklist
             $this->compiled = null;
         }
 
-        return $this->compiled ??= $this->compile();
+        if ($this->compiled !== null) {
+            return $this->compiled;
+        }
+
+        if ($this->compiling) {
+            return [];
+        }
+
+        $this->compiling = true;
+
+        try {
+            return $this->compiled = $this->compile();
+        } finally {
+            $this->compiling = false;
+        }
     }
 
     /**

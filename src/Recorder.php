@@ -65,7 +65,18 @@ final class Recorder
             return false;
         }
 
-        return !$this->blocklist->blocks($url);
+        // The gate itself can make HTTP calls — a provider that fetches its
+        // rules — and those arrive back here through the capture hooks. Held
+        // for the whole check, so a nested one declines instead of recursing.
+        $this->capturing = true;
+
+        try {
+            return !$this->blocklist->blocks($url);
+        } catch (\Throwable) {
+            return false;
+        } finally {
+            $this->capturing = false;
+        }
     }
 
     public function record(Exchange $exchange): void
