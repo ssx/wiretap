@@ -47,7 +47,7 @@ final readonly class Redactor
         // API that echoes its input back — and a great many do — would
         // otherwise hand the same value straight back in the response body,
         // where no structural rule is looking for it.
-        $known = new KnownSecrets($this->config->minEchoedSecretLength);
+        $known = new KnownSecrets($this->config->minEchoedSecretLength, $this->config->replacement);
 
         // Pass one: learn. Every secret the exchange contains is collected
         // before anything is swept, because a value removed from the request
@@ -513,12 +513,23 @@ final readonly class Redactor
             return $text;
         }
 
-        return Regex::replaceCallback(
+        $componentsRan = true;
+
+        $result = Regex::replaceCallback(
             '~https?://[^\s\'"<>]+~i',
-            fn (array $m): string => $this->redactQueryInPlace($m[0], '&', $known),
+            function (array $m) use ($known, &$componentsRan): string {
+                $url = $this->redactEncodedComponents($this->redactQueryInPlace($m[0], '&', $known), $ran);
+                $componentsRan = $componentsRan && $ran;
+
+                return $url;
+            },
             $text,
             $ran,
         );
+
+        $ran = $ran && $componentsRan;
+
+        return $result;
     }
 
     /**
@@ -622,8 +633,7 @@ final readonly class Redactor
             // Any other header may embed one — `Link`, `X-Original-Url` — and
             // those are rewritten in place, around the rest of the value.
             if ($this->isUrlHeader($name)) {
-                $value = $this->redactUrl($value, $known);
-                $urlsRan = true;
+                $value = $this->redactEncodedComponents($this->redactUrl($value, $known), $urlsRan);
             } else {
                 $value = $this->redactUrlParamsIn($value, $known, $urlsRan);
             }
@@ -799,12 +809,26 @@ final readonly class Redactor
      */
     private function redactUrlsIn(string $text, ?KnownSecrets $known = null, ?bool &$ran = null): string
     {
-        return Regex::replaceCallback(
+        $componentsRan = true;
+
+        // Detectors see each URL's components decoded, as they do for the
+        // exchange URI: `?ref=4111+1111+1111+1111` in an error message or a
+        // context value is a card number too.
+        $result = Regex::replaceCallback(
             '~https?://[^\s\'"<>]+~i',
-            fn (array $m): string => $this->redactUrl($m[0], $known),
+            function (array $m) use ($known, &$componentsRan): string {
+                $url = $this->redactEncodedComponents($this->redactUrl($m[0], $known), $ran);
+                $componentsRan = $componentsRan && $ran;
+
+                return $url;
+            },
             $text,
             $ran,
         );
+
+        $ran = $ran && $componentsRan;
+
+        return $result;
     }
 
     /**

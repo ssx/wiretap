@@ -255,3 +255,58 @@ describe('context values that are not strings', function (): void {
         expect($out->responseBody->bytes)->not->toContain('tok_live_ABCDEFGH12345');
     });
 });
+
+describe('card numbers in urls outside the exchange uri', function (): void {
+    it('finds an encoded card number in any url the record carries', function (): void {
+        // Decoded-component detection ran for the exchange URI only. The
+        // same URL in Location, Link, context or free text kept the number.
+        $url = 'https://x.test/next?ref=4111+1111+1111+1111';
+        $encoded = 'https://x.test/next?ref=4111%201111%201111%201111';
+
+        $out = (new Redactor())->redact(exchange(
+            responseHeaders: Headers::fromPairs([['Location', $encoded], ['Link', "<{$url}>; rel=next"]]),
+            responseBody: CapturedBody::captured('{"next":"' . $url . '"}', contentType: 'application/json'),
+            error: new TransferError(47, "redirect to {$url} failed"),
+        )->withContext(['redirected_to' => [$url], 'note' => "went to {$encoded}"]));
+
+        $json = (string) json_encode([$out->responseHeaders, $out->context, $out->error, $out->responseBody->bytes], JSON_UNESCAPED_SLASHES);
+
+        expect($json)->not->toContain('4111')
+            ->and($out->responseHeaders->first('Link'))->toEndWith('>; rel=next');
+    });
+});
+
+describe('the placeholder is never a secret', function (): void {
+    it('does not learn an already-redacted value and scrub its encoded form', function (): void {
+        // A hop URL that another layer had already redacted taught the
+        // redactor "[REDACTED]" as a secret, and its own encoded
+        // placeholder was then rewritten: the record no longer said what
+        // was stored upstream.
+        $out = (new Redactor())->redact(exchange()->withContext([
+            'redirected_to' => ['https://o.test/e?api_key=%5BREDACTED%5D'],
+        ]));
+
+        expect($out->context['redirected_to'][0])->toBe('https://o.test/e?api_key=%5BREDACTED%5D');
+    });
+
+    it('ignores hinted and repeated placeholders too', function (): void {
+        $config = new RedactionConfig(hashHint: true, hashSalt: 's');
+        $body = '{"a":"[REDACTED:0123abcd]","b":"[REDACTED] [REDACTED]"}';
+
+        $out = (new Redactor($config))->redact(exchange(
+            uri: 'https://o.test/e?token=%5BREDACTED%3A0123abcd%5D&key=%5BREDACTED%5D%20%5BREDACTED%5D',
+            responseBody: CapturedBody::captured($body, contentType: 'application/json'),
+        ));
+
+        expect($out->responseBody->bytes)->toBe($body);
+    });
+
+    it('still learns a real secret that merely contains the placeholder text', function (): void {
+        $out = (new Redactor())->redact(exchange(
+            uri: 'https://o.test/e?token=abc[REDACTED]secret99',
+            responseBody: CapturedBody::captured('{"echo":"abc[REDACTED]secret99"}', contentType: 'application/json'),
+        ));
+
+        expect($out->responseBody->bytes)->not->toContain('secret99');
+    });
+});
