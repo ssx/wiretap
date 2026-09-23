@@ -87,6 +87,15 @@ Set `WIRETAP_PATH` to put them somewhere else. Whatever you choose, it is
 still a directory full of credentials: keep it off shared volumes, out of the
 document root, and out of your backups.
 
+### Turning redaction off
+
+The default recorder, which `ssx/wiretap-auto` and plain setups use, redacts.
+To store plaintext on a machine where that is what you want, set
+`WIRETAP_REDACT=false`. Only an unmistakable false value (`false`, `0`, `off`
+or `no`, in any case) turns it off. Unset, empty or anything else, a typo
+included, leaves redaction on. Blocklisting is unaffected: blocked calls are
+still never captured.
+
 If you need permanent visibility into outbound traffic, you want metrics and
 traces, not payload capture. Use OpenTelemetry directly.
 
