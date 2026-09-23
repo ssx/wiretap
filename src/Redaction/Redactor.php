@@ -136,21 +136,94 @@ final readonly class Redactor
                 // own host vanished and an order reference matching a
                 // Content-Length was scrubbed out of the body.
                 if ($this->isCredentialHeader($name)) {
-                    $known->remember($value);
-                    $known->rememberCredentialValue($value);
-                    $known->rememberCookieValues($value);
+                    $this->learnHeaderValue($name, $value, $known);
                 }
 
                 if ($this->isUrlHeader($name)) {
                     $this->redactUrl($value, $known);
+                } else {
+                    // `Link`, `X-Original-Url` and any other header can carry
+                    // a URL whose named parameters are as secret as the
+                    // exchange's own.
+                    $this->learnUrlsIn($value, $known);
                 }
             }
         }
 
         // Values a body-path rule will remove are secrets wherever else they
-        // appear, including in the other body.
+        // appear, including in the other body. So are named parameters in any
+        // URL a body carries.
         foreach ([$exchange->requestBody, $exchange->responseBody] as $body) {
             $this->learnBodyPaths($body, $known);
+            $this->learnUrlsInBody($body, $known);
+        }
+
+        // Context can hold URLs too: Guzzle records every redirect hop.
+        $context = $exchange->context;
+
+        array_walk_recursive($context, function (mixed $value) use ($known): void {
+            if (is_string($value)) {
+                $this->learnUrlsIn($value, $known);
+            }
+        });
+    }
+
+    /**
+     * Learn a credential header's value, in each form it may be echoed.
+     */
+    private function learnHeaderValue(string $name, string $value, KnownSecrets $known): void
+    {
+        $known->remember($value);
+        $known->rememberCredentialValue($value);
+
+        // A request Cookie is a list of pairs; Set-Cookie is one pair and
+        // then attributes. Each needs its own reading.
+        if (strtolower($name) === 'cookie') {
+            $known->rememberRequestCookies($value);
+        } else {
+            $known->rememberCookieValues($value);
+        }
+    }
+
+    /**
+     * Learn the named parameters of every absolute URL in some free text.
+     */
+    private function learnUrlsIn(string $text, KnownSecrets $known): void
+    {
+        if (!str_contains($text, '://') || preg_match_all('~https?://[^\s\'"<>]+~i', $text, $matches) < 1) {
+            return;
+        }
+
+        foreach ($matches[0] as $url) {
+            $this->redactUrl($url, $known);
+        }
+    }
+
+    /**
+     * Learn URL parameters from a body: as written, and as decoded JSON so a
+     * URL serialised as `https:\/\/host\/?token=...` is seen too.
+     */
+    private function learnUrlsInBody(CapturedBody $body, KnownSecrets $known): void
+    {
+        if (!$body->isPresent() || !$this->config->isCapturableType($body->contentType)) {
+            return;
+        }
+
+        $bytes = (string) $body->bytes;
+        $this->learnUrlsIn($bytes, $known);
+
+        if (!str_contains($bytes, ':\/\/')) {
+            return;
+        }
+
+        $decoded = json_decode($bytes, true);
+
+        if (is_array($decoded)) {
+            array_walk_recursive($decoded, function (mixed $value) use ($known): void {
+                if (is_string($value)) {
+                    $this->learnUrlsIn($value, $known);
+                }
+            });
         }
     }
 
@@ -160,7 +233,12 @@ final readonly class Redactor
             return;
         }
 
-        $decoded = json_decode((string) $body->bytes, true);
+        // Form bodies too. Only JSON was read here, so a form field a path
+        // rule removed from the request was never known as a secret, and a
+        // response echoing it was stored in plaintext.
+        $decoded = $this->isFormType($body->contentType)
+            ? $this->parseForm((string) $body->bytes)
+            : json_decode((string) $body->bytes, true);
 
         if (!is_array($decoded)) {
             return;
@@ -270,6 +348,12 @@ final readonly class Redactor
             $url,
         );
 
+        // Pair by pair, with names decoded, so `%74oken`, `token[]` and
+        // `access%5Ftoken` are recognised as the parameters they are. `;` is
+        // honoured as a separator as well: some servers split on it, and this
+        // is the path where guessing wrong in the safe direction is the point.
+        $url = $this->redactQueryInPlace($url, '&;', $known);
+
         foreach ($this->config->query as $name) {
             $url = Regex::replaceCallback(
                 '~([?&]' . preg_quote($name, '~') . '=)[^&#]*~i',
@@ -293,9 +377,148 @@ final readonly class Redactor
      */
     private function redactUriDetectors(string $uri, KnownSecrets $known): string
     {
-        $clean = $this->applyPatterns($uri);
+        // Encoded components first. `?ref=4111+1111+1111+1111` is a card
+        // number to the server that receives it, but the detectors saw the
+        // plus signs and matched nothing.
+        $clean = $this->redactEncodedComponents($uri, $decodedRan);
+        $clean = $this->applyPatterns($clean, $patternsRan);
+
+        // A detector that could not run leaves the URI unexamined. The scheme
+        // and host describe the request and are kept; everything after them
+        // goes.
+        if (!$decodedRan || !$patternsRan) {
+            return $this->uriWithoutPath($uri);
+        }
 
         return $known->scrub($clean, $this->config->replacement);
+    }
+
+    /**
+     * Run the detectors over each percent- or plus-encoded URI component as
+     * the server will decode it, rewriting only the components that change.
+     */
+    private function redactEncodedComponents(string $uri, ?bool &$ran = null): string
+    {
+        $ran = true;
+
+        if (!str_contains($uri, '%') && !str_contains($uri, '+')) {
+            return $uri;
+        }
+
+        $tokens = preg_split('~([/?&=#;])~', $uri, -1, PREG_SPLIT_DELIM_CAPTURE);
+
+        if ($tokens === false) {
+            $ran = false;
+
+            return $uri;
+        }
+
+        foreach ($tokens as $index => $token) {
+            if ($index % 2 === 1 || (!str_contains($token, '%') && !str_contains($token, '+'))) {
+                continue;
+            }
+
+            $decoded = urldecode($token);
+            $clean = $this->applyPatterns($decoded, $complete);
+
+            if (!$complete) {
+                $ran = false;
+
+                return $uri;
+            }
+
+            if ($clean !== $decoded) {
+                $tokens[$index] = rawurlencode($clean);
+            }
+        }
+
+        return implode('', $tokens);
+    }
+
+    /**
+     * The scheme and authority only, for a URI whose remainder could not be
+     * examined.
+     */
+    private function uriWithoutPath(string $uri): string
+    {
+        $parts = parse_url($uri);
+
+        if (!is_array($parts) || !isset($parts['host'])) {
+            return $this->config->replacement;
+        }
+
+        return (isset($parts['scheme']) ? $parts['scheme'] . '://' : '//')
+            . $parts['host']
+            . (isset($parts['port']) ? ':' . $parts['port'] : '')
+            . '/' . $this->config->replacement;
+    }
+
+    /**
+     * Replace the values of sensitive named parameters in a URL's query,
+     * leaving every other byte as it was.
+     *
+     * redactUrl() rebuilds the query from parsed pairs. That suits the
+     * exchange URI, but a URL embedded in a header or a body is part of a
+     * larger string that must not be re-encoded around it.
+     */
+    private function redactQueryInPlace(string $url, string $separators, ?KnownSecrets $known = null): string
+    {
+        $fragment = '';
+        $hash = strpos($url, '#');
+
+        if ($hash !== false) {
+            $fragment = substr($url, $hash);
+            $url = substr($url, 0, $hash);
+        }
+
+        $question = strpos($url, '?');
+
+        if ($question === false) {
+            return $url . $fragment;
+        }
+
+        $parts = preg_split('~([' . preg_quote($separators, '~') . '])~', substr($url, $question + 1), -1, PREG_SPLIT_DELIM_CAPTURE);
+
+        if ($parts === false) {
+            return $url . $fragment;
+        }
+
+        foreach ($parts as $index => $part) {
+            $equals = strpos($part, '=');
+
+            if ($index % 2 === 1 || $equals === false) {
+                continue;
+            }
+
+            $name = urldecode(substr($part, 0, $equals));
+
+            if ($this->isSensitiveQueryParam(QueryString::baseName($name))) {
+                $parts[$index] = substr($part, 0, $equals + 1)
+                    . $this->redactLeaf(urldecode(substr($part, $equals + 1)), $known);
+            }
+        }
+
+        return substr($url, 0, $question + 1) . implode('', $parts) . $fragment;
+    }
+
+    /**
+     * Redact the named parameters of every absolute URL in free text, in
+     * place.
+     */
+    private function redactUrlParamsIn(string $text, ?KnownSecrets $known = null, ?bool &$ran = null): string
+    {
+        $ran = true;
+
+        if (!str_contains($text, '://')) {
+            return $text;
+        }
+
+        return Regex::replaceCallback(
+            '~https?://[^\s\'"<>]+~i',
+            fn (array $m): string => $this->redactQueryInPlace($m[0], '&', $known),
+            $text,
+            $ran,
+        );
     }
 
     /**
@@ -386,9 +609,9 @@ final readonly class Redactor
     {
         return $headers->map(function (string $name, string $value) use ($known): string {
             if ($this->isSensitiveHeader($name)) {
-                $known?->remember($value);
-                $known?->rememberCredentialValue($value);
-                $known?->rememberCookieValues($value);
+                if ($known !== null) {
+                    $this->learnHeaderValue($name, $value, $known);
+                }
 
                 return $this->replacementFor($value);
             }
@@ -396,11 +619,22 @@ final readonly class Redactor
             // A header that carries a URL carries everything in its query
             // string. `Location: https://host/?token=...` survived untouched
             // while the same token was being stripped from the exchange URI.
+            // Any other header may embed one — `Link`, `X-Original-Url` — and
+            // those are rewritten in place, around the rest of the value.
             if ($this->isUrlHeader($name)) {
                 $value = $this->redactUrl($value, $known);
+                $urlsRan = true;
+            } else {
+                $value = $this->redactUrlParamsIn($value, $known, $urlsRan);
             }
 
-            $value = $this->applyPatterns($value);
+            $value = $this->applyPatterns($value, $patternsRan);
+
+            // A detector that could not run leaves the value unexamined, and
+            // an unexamined value is not stored.
+            if (!$urlsRan || !$patternsRan) {
+                return $this->config->replacement;
+            }
 
             if ($known !== null) {
                 $value = $known->scrub($value, $this->config->replacement);
@@ -489,13 +723,27 @@ final readonly class Redactor
      * Context is supplied by framework integrations and can contain a route
      * path with a secret in it — a password-reset token, for instance.
      *
-     * @param array<string, scalar|null> $context
+     * Values are walked recursively. Only strings at the top level used to
+     * be redacted, and Guzzle records its redirect hops as a list — so a
+     * hop's token was stored exactly as it was sent.
      *
-     * @return array<string, scalar|null>
+     * @param array<array-key, mixed> $context
+     *
+     * @return array<array-key, mixed>
      */
-    private function redactContext(array $context, KnownSecrets $known): array
+    private function redactContext(array $context, KnownSecrets $known, int $depth = 0): array
     {
         foreach ($context as $key => $value) {
+            if (is_array($value)) {
+                // Deeper than any integration nests; not worth walking, and
+                // not worth keeping unexamined either.
+                $context[$key] = $depth >= 16
+                    ? $this->config->replacement
+                    : $this->redactContext($value, $known, $depth + 1);
+
+                continue;
+            }
+
             if (!is_string($value) || $value === '') {
                 continue;
             }
@@ -532,8 +780,16 @@ final readonly class Redactor
      */
     private function redactText(string $text, KnownSecrets $known): string
     {
-        $clean = $this->redactUrlsIn($text, $known);
-        $clean = $this->applyPatterns($clean);
+        $clean = $this->redactUrlsIn($text, $known, $urlsRan);
+        $clean = $this->applyPatterns($clean, $patternsRan);
+
+        // A detector that could not run — invalid UTF-8 under a /u pattern, a
+        // PCRE limit — leaves the text unexamined. Bodies were already dropped
+        // in that case; headers, error messages, reasons, tags and context
+        // were stored with the secret the pattern exists to remove.
+        if (!$urlsRan || !$patternsRan) {
+            return $this->config->replacement;
+        }
 
         return $known->scrub($clean, $this->config->replacement);
     }
@@ -541,12 +797,13 @@ final readonly class Redactor
     /**
      * Rewrite any absolute URL embedded in free text.
      */
-    private function redactUrlsIn(string $text, ?KnownSecrets $known = null): string
+    private function redactUrlsIn(string $text, ?KnownSecrets $known = null, ?bool &$ran = null): string
     {
         return Regex::replaceCallback(
             '~https?://[^\s\'"<>]+~i',
             fn (array $m): string => $this->redactUrl($m[0], $known),
             $text,
+            $ran,
         );
     }
 
@@ -637,6 +894,19 @@ final readonly class Redactor
             $bytes = $known->scrub($bytes, $this->config->replacement);
         }
 
+        // Named parameters in URLs the body carries. Values long enough to be
+        // learned are already gone; this catches the short ones.
+        $bytes = $this->redactUrlParamsIn($bytes, $known, $urlsRan);
+
+        if ($urlsRan === false && $this->config->omitUninspectableBodies) {
+            return CapturedBody::omitted(
+                CapturedBody::OMITTED_REDACTED,
+                $body->size,
+                $body->contentType,
+                $this->digestFor($body->sha256),
+            );
+        }
+
         // Layer 6. A mis-scoped path rule should not be able to become an
         // incident, so the finished value is scanned once more and the whole
         // body dropped if anything survived.
@@ -663,7 +933,12 @@ final readonly class Redactor
         // no longer stored — and a SHA-256 of a low-entropy payload beside its
         // own redaction is an oracle, not metadata. `{"pin":"4821"}` was
         // recovered from it by brute force in three milliseconds.
-        if ($bytes !== (string) $body->bytes) {
+        //
+        // A body the capture layer truncated is the same case even when
+        // nothing here changed it: the digest describes the whole body beside
+        // a stored prefix, so only the tail is unknown — and a six-digit OTP
+        // tail was recovered from it in under a second.
+        if ($bytes !== (string) $body->bytes || $body->truncated) {
             $result = $result->withDigest($this->digestFor($body->sha256));
         }
 
@@ -896,29 +1171,9 @@ final readonly class Redactor
         $type = strtolower(explode(';', $contentType ?? '')[0]);
 
         if (str_contains($type, 'x-www-form-urlencoded')) {
-            // parse_str truncates at max_input_vars (1000 by default) and
-            // raises E_WARNING while doing it. Both matter: the fields past
-            // the limit are invisible to the path rules, so a body could be
-            // marked inspected while the field the operator named was never
-            // looked at — and under a framework error handler that warning
-            // becomes an exception thrown from inside the instrumentation,
-            // which Recorder::record() then swallows along with the whole
-            // exchange.
-            $overflowed = false;
+            $form = $this->parseForm($bytes);
 
-            set_error_handler(static function (int $_, string $message) use (&$overflowed): bool {
-                $overflowed = $overflowed || str_contains($message, 'Input variables exceeded');
-
-                return true;
-            });
-
-            try {
-                parse_str($bytes, $form);
-            } finally {
-                restore_error_handler();
-            }
-
-            if ($overflowed) {
+            if ($form === null) {
                 // Not inspected. The caller falls back to the safety net
                 // rather than persisting a body whose rules never ran.
                 return $bytes;
@@ -952,6 +1207,43 @@ final readonly class Redactor
         $inspected = true;
 
         return $encoded;
+    }
+
+    private function isFormType(?string $contentType): bool
+    {
+        return str_contains(strtolower(explode(';', $contentType ?? '')[0]), 'x-www-form-urlencoded');
+    }
+
+    /**
+     * parse_str, or null when it could not read every field.
+     *
+     * parse_str truncates at max_input_vars (1000 by default) and raises
+     * E_WARNING while doing it. Both matter: the fields past the limit are
+     * invisible to the path rules, so a body could be marked inspected while
+     * the field the operator named was never looked at — and under a
+     * framework error handler that warning becomes an exception thrown from
+     * inside the instrumentation, which Recorder::record() then swallows
+     * along with the whole exchange.
+     *
+     * @return array<array-key, mixed>|null
+     */
+    private function parseForm(string $bytes): ?array
+    {
+        $overflowed = false;
+
+        set_error_handler(static function (int $_, string $message) use (&$overflowed): bool {
+            $overflowed = $overflowed || str_contains($message, 'Input variables exceeded');
+
+            return true;
+        });
+
+        try {
+            parse_str($bytes, $form);
+        } finally {
+            restore_error_handler();
+        }
+
+        return $overflowed ? null : $form;
     }
 
     /**
@@ -1019,7 +1311,8 @@ final readonly class Redactor
             }
 
             if ($name === 'pan') {
-                $value = $this->redactPans($value);
+                $value = $this->redactPans($value, $ran);
+                $complete = $complete && $ran;
 
                 continue;
             }
@@ -1060,9 +1353,11 @@ final readonly class Redactor
      * Every PAN candidate is Luhn-checked before replacement, so order
      * numbers and timestamps survive and real card numbers do not.
      */
-    private function redactPans(string $value): string
+    private function redactPans(string $value, ?bool &$ran = null): string
     {
-        return preg_replace_callback(
+        // Through Regex so a PCRE failure is reported, not answered with the
+        // original value — which is the card number.
+        return Regex::replaceCallback(
             Patterns::PAN,
             function (array $m): string {
                 $found = Patterns::findPans($m[0]);
@@ -1076,7 +1371,8 @@ final readonly class Redactor
                 return str_replace($found[0], $this->replacementFor($found[0]), $m[0]);
             },
             $value,
-        ) ?? $value;
+            $ran,
+        );
     }
 
     private function containsLikelySecret(string $value): bool
@@ -1128,13 +1424,19 @@ final readonly class Redactor
                 continue;
             }
 
-            if (preg_match($regex, $value) === 1) {
+            // A scan that could not run has not shown the value is clean.
+            if (preg_match($regex, $value) !== 0) {
                 return true;
             }
         }
 
-        if (($this->config->patterns['pan'] ?? false) === true
-            && preg_match_all(Patterns::PAN, $value, $matches) > 0) {
+        if (($this->config->patterns['pan'] ?? false) === true) {
+            $count = preg_match_all(Patterns::PAN, $value, $matches);
+
+            if ($count === false) {
+                return true;
+            }
+
             foreach ($matches[0] as $candidate) {
                 if (Patterns::findPans($candidate) !== []) {
                     return true;
