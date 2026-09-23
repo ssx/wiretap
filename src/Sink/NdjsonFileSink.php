@@ -101,6 +101,12 @@ final class NdjsonFileSink implements ExchangeSink
                 return;
             }
 
+            // A directory someone created before us — or left open — keeps
+            // whatever mode it had, so captures were being written into a
+            // listable, traversable directory. Only bits are removed, never
+            // added: the directory keeps no wider an audience than the files.
+            $this->tighten($this->directory, $this->directoryMode());
+
             $path = $this->currentFile();
 
             // Never follow a symlink here. Appending through one hands an
@@ -123,8 +129,14 @@ final class NdjsonFileSink implements ExchangeSink
             // 0022 — so a file created here was world-readable for the whole
             // write, and anything appended in that window stayed readable to
             // every account on the host until the next record arrived.
+            //
+            // An existing file is tightened too. One created by an earlier
+            // version, by hand, or by a process with a different umask stayed
+            // world-readable for good, however many records went into it.
             if ($new) {
                 @chmod($path, $this->filePermissions);
+            } else {
+                $this->tighten($path, $this->filePermissions);
             }
 
             try {
@@ -151,6 +163,44 @@ final class NdjsonFileSink implements ExchangeSink
         } finally {
             restore_error_handler();
         }
+    }
+
+    /**
+     * Remove any permission bit that $allowed does not grant.
+     *
+     * Only for paths this process owns; chmod on anything else fails anyway,
+     * and the ownership check above has already refused a foreign directory.
+     */
+    private function tighten(string $path, int $allowed): void
+    {
+        $mode = @fileperms($path);
+
+        if ($mode === false) {
+            return;
+        }
+
+        $mode &= 0o777;
+
+        if (($mode & ~$allowed) !== 0) {
+            @chmod($path, $mode & $allowed);
+        }
+    }
+
+    /**
+     * The directory mode that matches the file mode: owner rwx, and read plus
+     * traverse for whichever group or other bits the files are readable by.
+     */
+    private function directoryMode(): int
+    {
+        $mode = 0o700;
+
+        foreach ([0o040 => 0o050, 0o004 => 0o005] as $read => $grant) {
+            if (($this->filePermissions & $read) !== 0) {
+                $mode |= $grant;
+            }
+        }
+
+        return $mode;
     }
 
     /**

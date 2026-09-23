@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Ssx\Wiretap\Cli\Command;
 
 use Ssx\Wiretap\Cli\Input;
+use Ssx\Wiretap\Cli\Output;
 use Ssx\Wiretap\Exchange;
 use Ssx\Wiretap\Export\HarExporter;
 
@@ -29,13 +30,13 @@ final class ShowCommand extends AbstractCommand
         }
 
         if ($input->flag('curl')) {
-            $this->output->line($this->toCurl($exchange));
+            $this->output->line($this->safe($this->toCurl($exchange)));
 
             return 0;
         }
 
         if ($input->flag('har')) {
-            $this->output->line((new HarExporter())->toJson([$exchange]));
+            $this->output->line(Output::cleanJson((new HarExporter())->toJson([$exchange])));
 
             return 0;
         }
@@ -67,13 +68,13 @@ final class ShowCommand extends AbstractCommand
         $o = $this->output;
 
         $o->line();
-        $o->line($o->bold($exchange->method . ' ') . $exchange->uri);
+        $o->line($o->bold($this->safe($exchange->method) . ' ') . $this->safe($exchange->uri));
         $o->line($o->dim(sprintf(
             '  %s · %s · %s · id %s',
             $o->statusColour($exchange->status),
             $this->formatMs($exchange->timings->total),
             $this->relativeAge($exchange->startedAt),
-            $exchange->id,
+            $this->safe($exchange->id),
         )));
 
         if ($exchange->context !== []) {
@@ -81,7 +82,7 @@ final class ShowCommand extends AbstractCommand
 
             foreach ($exchange->context as $key => $value) {
                 if ($value !== null && $value !== '') {
-                    $pairs[] = $key . '=' . $value;
+                    $pairs[] = $this->safe($key . '=' . $value);
                 }
             }
 
@@ -91,7 +92,7 @@ final class ShowCommand extends AbstractCommand
         }
 
         if ($exchange->error !== null) {
-            $o->line('  ' . $o->red(sprintf('transport error %d: %s', $exchange->error->errno, $exchange->error->message)));
+            $o->line('  ' . $o->red(sprintf('transport error %d: %s', $exchange->error->errno, $this->safe($exchange->error->message))));
         }
 
         $this->renderTimings($exchange);
@@ -100,15 +101,16 @@ final class ShowCommand extends AbstractCommand
         $o->line($o->cyan('REQUEST'));
         $this->renderHeaders($exchange, true);
         $o->line();
-        $o->line($raw ? (string) $exchange->requestBody->bytes : $this->prettyBody($exchange, true));
+        $o->line($raw ? $this->safe((string) $exchange->requestBody->bytes) : $this->prettyBody($exchange, true));
 
         $o->line();
         $o->line($o->cyan('RESPONSE'));
         $this->renderHeaders($exchange, false);
         $o->line();
-        $o->line($raw ? (string) $exchange->responseBody->bytes : $this->prettyBody($exchange, false));
+        $o->line($raw ? $this->safe((string) $exchange->responseBody->bytes) : $this->prettyBody($exchange, false));
         $o->line();
-        $o->line($o->dim('  correlation ' . $exchange->correlationId . '  ·  wiretap trace ' . $exchange->correlationId));
+        $correlation = $this->safe($exchange->correlationId);
+        $o->line($o->dim('  correlation ' . $correlation . '  ·  wiretap trace ' . $correlation));
         $o->line();
     }
 
@@ -124,7 +126,7 @@ final class ShowCommand extends AbstractCommand
         }
 
         foreach ($headers as [$name, $value]) {
-            $this->output->line(sprintf('  %s %s: %s', $this->output->dim($marker), $this->output->bold($name), $value));
+            $this->output->line(sprintf('  %s %s: %s', $this->output->dim($marker), $this->output->bold($this->safe($name)), $this->safe($value)));
         }
     }
 

@@ -39,14 +39,14 @@ final class ListCommand extends AbstractCommand
                 '  %-3d %-14s %-6s %s %8s  %s',
                 $i + 1,
                 $this->relativeAge($exchange->startedAt),
-                $exchange->method,
+                $this->safe($exchange->method),
                 $status,
                 $this->formatMs($exchange->timings->total),
                 $this->shortUri($exchange->uri),
             ));
 
             if ($exchange->error !== null) {
-                $o->line('      ' . $o->red('└ ' . $exchange->error->message));
+                $o->line('      ' . $o->red('└ ' . $this->safe($exchange->error->message)));
             }
         }
 
