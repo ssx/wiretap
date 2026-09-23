@@ -170,6 +170,19 @@ final class ShowCommand extends AbstractCommand
             $parts[] = '-H ' . escapeshellarg($name . ': ' . $value);
         }
 
+        // The curl CLI adds an Accept and a User-Agent of its own. When the
+        // record holds the complete header set (sent, or rebuilt from the
+        // curl options), a missing one was not on the wire, so the replay
+        // removes curl's. A record of only the configured headers says
+        // nothing either way and is left alone.
+        if (in_array($exchange->context['request_headers'] ?? null, ['sent', 'reconstructed'], true)) {
+            foreach (['Accept', 'User-Agent'] as $name) {
+                if (!$exchange->requestHeaders->has($name)) {
+                    $parts[] = '-H ' . escapeshellarg($name . ':');
+                }
+            }
+        }
+
         if ($exchange->requestBody->isPresent()) {
             $parts[] = '--data ' . escapeshellarg((string) $exchange->requestBody->bytes);
         }
