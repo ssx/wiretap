@@ -9,6 +9,7 @@ use Ssx\Wiretap\Cli\Output;
 use Ssx\Wiretap\Exchange;
 use Ssx\Wiretap\Query\ExchangeQuery;
 use Ssx\Wiretap\Reader\NdjsonReader;
+use Ssx\Wiretap\Support\Json;
 
 abstract class AbstractCommand
 {
@@ -128,10 +129,14 @@ abstract class AbstractCommand
         }
 
         $text = (string) $body->bytes;
-        $decoded = json_decode($text, true);
+        $decoded = Json::decode($text);
 
-        if (is_array($decoded)) {
-            $text = (string) json_encode($decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        // Pretty-printed without changing a value: an id beyond PHP_INT_MAX,
+        // an empty object and a zero fraction are shown as they were stored,
+        // not as 1.2345678901234567e+19, [] and 10.
+        if ($decoded !== null) {
+            $pretty = Json::encode($decoded, $text, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            $text = $pretty === false ? $text : $pretty;
         }
 
         $text = $this->safe($text);

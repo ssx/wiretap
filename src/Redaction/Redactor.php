@@ -8,6 +8,7 @@ use Ssx\Wiretap\CapturedBody;
 use Ssx\Wiretap\Exchange;
 use Ssx\Wiretap\Headers;
 use Ssx\Wiretap\TransferError;
+use Ssx\Wiretap\Support\Json;
 use Ssx\Wiretap\Support\QueryString;
 use Ssx\Wiretap\Support\Regex;
 
@@ -235,25 +236,41 @@ final readonly class Redactor
 
         // Form bodies too. Only JSON was read here, so a form field a path
         // rule removed from the request was never known as a secret, and a
-        // response echoing it was stored in plaintext.
-        $decoded = $this->isFormType($body->contentType)
-            ? $this->parseForm((string) $body->bytes)
-            : json_decode((string) $body->bytes, true);
+        // response echoing it was stored in plaintext. Read pair by pair, so
+        // every occurrence of a repeated field is learned, not just the last.
+        if ($this->isFormType($body->contentType)) {
+            $this->spliceForm((string) $body->bytes, function (array $segments, ?string $value) use ($known): ?string {
+                if ($value !== null && $this->pathTargets($segments)) {
+                    $known->remember($value);
+                }
+
+                return null;
+            });
+
+            return;
+        }
+
+        $decoded = json_decode((string) $body->bytes, true);
 
         if (!is_array($decoded)) {
             return;
         }
 
         foreach ($this->config->bodyPaths as $path) {
-            $this->collectPath($decoded, explode('.', $path), $known);
+            $this->collectPath($decoded, explode('.', $path), static function (mixed $leaf) use ($known): void {
+                $known->remember((string) $leaf);
+            });
         }
     }
 
     /**
-     * @param array<array-key, mixed> $data
-     * @param list<string>            $segments
+     * Visit every scalar a body path rule targets.
+     *
+     * @param array<array-key, mixed>  $data
+     * @param list<string>             $segments
+     * @param callable(scalar): void   $visit
      */
-    private function collectPath(array $data, array $segments, KnownSecrets $known): void
+    private function collectPath(array $data, array $segments, callable $visit): void
     {
         if ($segments === []) {
             return;
@@ -272,28 +289,34 @@ final readonly class Redactor
             if ($segments === []) {
                 // Everything beneath a removed key is equally secret.
                 if (is_array($value)) {
-                    array_walk_recursive($value, static function (mixed $leaf) use ($known): void {
+                    array_walk_recursive($value, static function (mixed $leaf) use ($visit): void {
                         if (is_scalar($leaf)) {
-                            $known->remember((string) $leaf);
+                            $visit($leaf);
                         }
                     });
                 } elseif (is_scalar($value)) {
-                    $known->remember((string) $value);
+                    $visit($value);
                 }
 
                 continue;
             }
 
             if (is_array($value)) {
-                $this->collectPath($value, $segments, $known);
+                $this->collectPath($value, $segments, $visit);
             }
         }
     }
 
     /**
-     * Layer 2. Rewrites the query string properly rather than regexing the
+     * Layer 2. Rewrites the query string pair by pair rather than regexing the
      * whole URL, so a parameter value that happens to contain an ampersand
      * cannot smuggle plaintext through.
+     *
+     * Only the pairs that are redacted are rewritten; every other byte is kept
+     * as it was sent. Rebuilding the query from parsed pairs re-encoded URLs
+     * that had nothing in them to redact — `q=a+b` became `q=a%20b`, `%zz`
+     * became `%25zz`, and a scheme-relative `//host/x` lost its `//` — so
+     * the record no longer showed the request that was made.
      */
     public function redactUrl(string $url, ?KnownSecrets $known = null): string
     {
@@ -316,19 +339,97 @@ final readonly class Redactor
             return $url;
         }
 
-        $query = '';
-
-        if ($hasQuery) {
-            $query = QueryString::build(
-                $this->redactQueryPairs(QueryString::parse((string) $parts['query']), $known),
-            );
-        }
-
         if ($known !== null && isset($parts['pass'])) {
             $known->remember((string) $parts['pass']);
         }
 
-        return $this->rebuildUrl($parts, $query);
+        $spliced = $this->redactQueryInPlace($url, '&', $known, encode: true);
+
+        if (isset($parts['user'])) {
+            $spliced = $this->replaceUserinfo($spliced, isset($parts['pass']));
+        }
+
+        // The splice has to agree with parse_url about where the userinfo
+        // and query are. Where it does not, rebuild from the parsed parts:
+        // less faithful, but it cannot leave a credential behind.
+        return $spliced !== null && $this->spliceAgrees($parts, $spliced)
+            ? $spliced
+            : $this->rebuildUrl($parts, $hasQuery
+                ? QueryString::build($this->redactQueryPairs(QueryString::parse((string) $parts['query'])))
+                : '');
+    }
+
+    /**
+     * Replace the userinfo of a URL in place, or null when it cannot be found.
+     */
+    private function replaceUserinfo(string $url, bool $hasPassword): ?string
+    {
+        $start = strpos($url, '//');
+
+        if ($start === false) {
+            return null;
+        }
+
+        $start += 2;
+        $end = strcspn($url, '/?#', $start) + $start;
+        $at = strrpos(substr($url, $start, $end - $start), '@');
+
+        if ($at === false) {
+            return null;
+        }
+
+        $replacement = $this->config->replacement
+            . ($hasPassword ? ':' . $this->config->replacement : '');
+
+        return substr($url, 0, $start) . $replacement . substr($url, $start + $at);
+    }
+
+    /**
+     * Whether a spliced URL is what redaction should have produced: the same
+     * host, port and path, no userinfo but the placeholder, and no sensitive
+     * parameter left holding anything but it.
+     *
+     * @param array<string, int|string> $original
+     */
+    private function spliceAgrees(array $original, string $spliced): bool
+    {
+        $parts = parse_url($spliced);
+
+        if (!is_array($parts)) {
+            return false;
+        }
+
+        foreach (['scheme', 'host', 'port', 'path'] as $key) {
+            if (($parts[$key] ?? null) !== ($original[$key] ?? null)) {
+                return false;
+            }
+        }
+
+        foreach (['user', 'pass'] as $key) {
+            if (isset($parts[$key]) && $parts[$key] !== $this->config->replacement) {
+                return false;
+            }
+        }
+
+        foreach (QueryString::parse((string) ($parts['query'] ?? '')) as [$name, $value]) {
+            if ($value !== null && $this->isSensitiveQueryParam(QueryString::baseName($name))
+                && !$this->isPlaceholder($value)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Whether a value is the replacement, with or without a hash hint.
+     */
+    private function isPlaceholder(string $value): bool
+    {
+        $bare = rtrim($this->config->replacement, ']');
+
+        return $value === $this->config->replacement
+            || (str_starts_with($value, $bare . ':') && str_ends_with($value, ']'));
     }
 
     /**
@@ -461,7 +562,7 @@ final readonly class Redactor
      * exchange URI, but a URL embedded in a header or a body is part of a
      * larger string that must not be re-encoded around it.
      */
-    private function redactQueryInPlace(string $url, string $separators, ?KnownSecrets $known = null): string
+    private function redactQueryInPlace(string $url, string $separators, ?KnownSecrets $known = null, bool $encode = false): string
     {
         $fragment = '';
         $hash = strpos($url, '#');
@@ -493,8 +594,8 @@ final readonly class Redactor
             $name = urldecode(substr($part, 0, $equals));
 
             if ($this->isSensitiveQueryParam(QueryString::baseName($name))) {
-                $parts[$index] = substr($part, 0, $equals + 1)
-                    . $this->redactLeaf(urldecode(substr($part, $equals + 1)), $known);
+                $leaf = $this->redactLeaf(urldecode(substr($part, $equals + 1)), $known);
+                $parts[$index] = substr($part, 0, $equals + 1) . ($encode ? rawurlencode($leaf) : $leaf);
             }
         }
 
@@ -594,6 +695,9 @@ final readonly class Redactor
 
         if (isset($parts['scheme'])) {
             $url .= $parts['scheme'] . '://';
+        } elseif (isset($parts['host'])) {
+            // Scheme-relative: without the `//` the host reads as a path.
+            $url .= '//';
         }
 
         // Credentials in userinfo are secrets by definition.
@@ -988,12 +1092,6 @@ final readonly class Redactor
             return $bytes;
         }
 
-        // A second decode that keeps oversized integer literals as strings.
-        // Walked in lockstep with the first, it is what lets an id beyond
-        // PHP_INT_MAX be told apart from a JSON string that merely looks like
-        // one, so it can be written back out as the integer it was.
-        $wide = json_decode($bytes, false, 512, JSON_BIGINT_AS_STRING);
-
         $changed = false;
 
         $decoded = $this->walkJson($decoded, function (string $value) use ($known, &$changed): string {
@@ -1020,18 +1118,9 @@ final readonly class Redactor
             return $bytes;
         }
 
-        $decoded = $this->markWideIntegers($decoded, $wide);
+        $encoded = Json::encode($decoded, $bytes, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
-        $encoded = json_encode(
-            $decoded,
-            JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION,
-        );
-
-        if ($encoded === false) {
-            return $bytes;
-        }
-
-        return $this->unmarkWideIntegers($encoded);
+        return $encoded === false ? $bytes : $encoded;
     }
 
     /**
@@ -1048,102 +1137,106 @@ final readonly class Redactor
             return $bytes;
         }
 
-        $pairs = QueryString::parse($bytes);
-
-        if ($pairs === []) {
-            return $bytes;
-        }
-
-        $changed = false;
-
-        foreach ($pairs as $index => [$name, $value]) {
+        // Only the pairs a detector changed are rewritten. Rebuilding the
+        // body re-encoded every other field and dropped repeated names, which
+        // is the same falsification the JSON path used to commit.
+        return $this->spliceForm($bytes, function (array $segments, ?string $value): ?string {
             if ($value === null) {
-                continue;
+                return null;
             }
 
             $clean = $this->applyPatterns($value);
 
-            if ($clean !== $value) {
-                $pairs[$index] = [$name, $clean];
+            return $clean !== $value ? $clean : null;
+        });
+    }
+
+    /**
+     * Rewrite a form body pair by pair, leaving every byte of the pairs that
+     * are not rewritten exactly as it was.
+     *
+     * $rewrite receives each pair's name as PHP reads it, as a list of
+     * segments (`user[pin]` is `['user', 'pin']`, and `pass.word` is
+     * `['pass_word']`, as parse_str renames it), and its decoded value, or
+     * null for a pair with no `=`. It returns the new decoded value, or null
+     * to keep the pair.
+     *
+     * @param callable(list<string>, string|null): (string|null) $rewrite
+     */
+    private function spliceForm(string $bytes, callable $rewrite): string
+    {
+        $parts = explode('&', $bytes);
+        $changed = false;
+
+        foreach ($parts as $index => $part) {
+            if ($part === '') {
+                continue;
+            }
+
+            $equals = strpos($part, '=');
+            $rawName = $equals === false ? $part : substr($part, 0, $equals);
+            $value = $equals === false ? null : urldecode(substr($part, $equals + 1));
+
+            $new = $rewrite($this->formNameSegments($rawName), $value);
+
+            if ($new !== null) {
+                $parts[$index] = $rawName . '=' . rawurlencode($new);
                 $changed = true;
             }
         }
 
-        // An unchanged body goes back exactly as it arrived. Rebuilding it
-        // regardless would re-encode every field and drop repeated names,
-        // which is the same falsification the JSON path used to commit.
-        return $changed ? QueryString::build($pairs) : $bytes;
+        return $changed ? implode('&', $parts) : $bytes;
     }
 
     /**
-     * Sentinel wrapped around an integer too large for PHP's int type, so it
-     * survives the round trip through json_encode as a number.
-     */
-    private const WIDE_INT = "\x00wiretap:int\x00";
-
-    /**
-     * Replace every oversized integer with a marked string.
+     * A form field name as the segments parse_str would nest it under.
      *
-     * $plain decoded them as floats; $wide decoded the same document with
-     * JSON_BIGINT_AS_STRING. Where the two disagree in exactly that way, the
-     * source held an integer literal PHP cannot represent, and json_encode
-     * would otherwise write 12345678901234567890 back out as
-     * 1.2345678901234567e+19 — a different id, silently, in a record whose
-     * entire purpose is to say what was actually sent.
+     * parse_str itself does the reading, one name at a time, so names are
+     * understood exactly as the path rules have always seen them.
+     *
+     * @return list<string>
      */
-    private function markWideIntegers(mixed $plain, mixed $wide, int $depth = 0): mixed
+    private function formNameSegments(string $rawName): array
     {
-        if ($depth > 512) {
-            return $plain;
+        parse_str($rawName . '=', $one);
+
+        $segments = [];
+        $node = $one;
+
+        while (is_array($node) && count($node) === 1) {
+            $key = array_key_first($node);
+            $segments[] = (string) $key;
+            $node = $node[$key];
         }
 
-        if (is_float($plain) && is_string($wide) && preg_match('/^-?\d+$/', $wide) === 1) {
-            return self::WIDE_INT . $wide;
-        }
-
-        if (is_array($plain) && is_array($wide)) {
-            foreach ($plain as $key => $item) {
-                if (array_key_exists($key, $wide)) {
-                    $plain[$key] = $this->markWideIntegers($item, $wide[$key], $depth + 1);
-                }
-            }
-
-            return $plain;
-        }
-
-        if ($plain instanceof \stdClass && $wide instanceof \stdClass) {
-            $other = get_object_vars($wide);
-
-            foreach (get_object_vars($plain) as $key => $item) {
-                if (array_key_exists($key, $other)) {
-                    $plain->{$key} = $this->markWideIntegers($item, $other[$key], $depth + 1);
-                }
-            }
-
-            return $plain;
-        }
-
-        return $plain;
+        return $segments;
     }
 
     /**
-     * Unquote the marked integers json_encode has just written as strings.
+     * Whether a body path rule covers a field with these segments: the rule
+     * names the field itself, or a parent of it.
      *
-     * The sentinel contains NUL bytes, which json_encode always escapes as
-     * \u0000, so the pattern below cannot collide with any content that was
-     * genuinely in the body.
+     * @param list<string> $segments
      */
-    private function unmarkWideIntegers(string $encoded): string
+    private function pathTargets(array $segments): bool
     {
-        if (!str_contains($encoded, '\u0000wiretap:int\u0000')) {
-            return $encoded;
+        foreach ($this->config->bodyPaths as $path) {
+            $rule = explode('.', $path);
+
+            if (count($rule) > count($segments)) {
+                continue;
+            }
+
+            foreach ($rule as $i => $segment) {
+                if ($segment !== '*' && $segment !== $segments[$i]) {
+                    continue 2;
+                }
+            }
+
+            return true;
         }
 
-        return Regex::replaceCallback(
-            '/"\\\\u0000wiretap:int\\\\u0000(-?\d+)"/',
-            static fn (array $m): string => $m[1],
-            $encoded,
-        );
+        return false;
     }
 
     /**
@@ -1203,26 +1296,52 @@ final readonly class Redactor
                 return $bytes;
             }
 
-            $redacted = $this->redactPaths($form, $this->config->bodyPaths);
             $inspected = true;
 
-            // Rebuilding an unchanged body would re-encode every field and
-            // drop repeated names for no benefit.
-            return $redacted === $form
-                ? $bytes
-                : http_build_query($redacted, '', '&', PHP_QUERY_RFC3986);
+            // Pair by pair, in place. Rebuilding through http_build_query
+            // re-encoded every field, renamed `a.b` to `a_b` and kept only the
+            // last of a repeated name, so the record showed a request that
+            // was never sent.
+            $spliced = $this->spliceForm($bytes, function (array $segments, ?string $value): ?string {
+                return $this->pathTargets($segments)
+                    ? $this->replacementFor($value ?? '')
+                    : null;
+            });
+
+            if ($this->formPathsHold($spliced)) {
+                return $spliced;
+            }
+
+            // parse_str disagreed with the splice about some name. Redaction
+            // wins over fidelity: rebuild from what parse_str read.
+            return http_build_query($this->redactPaths($form, $this->config->bodyPaths), '', '&', PHP_QUERY_RFC3986);
         }
 
-        $decoded = json_decode($bytes, true);
+        // Objects stay objects, so {} is not written back as [].
+        $decoded = Json::decode($bytes);
 
-        if (!is_array($decoded)) {
+        if ($decoded === null) {
             // Not JSON, malformed, or a truncated prefix. The caller decides
             // what to do; it must not be treated as successfully inspected.
             return $bytes;
         }
 
-        $redacted = $this->redactPaths($decoded, $this->config->bodyPaths);
-        $encoded = json_encode($redacted, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $changed = false;
+
+        foreach ($this->config->bodyPaths as $path) {
+            $decoded = $this->redactPath($decoded, explode('.', $path), $changed);
+        }
+
+        // A body the rules did not change is stored as it arrived, and keeps
+        // its digest. Re-encoding it anyway rewrote ids, objects and zero
+        // fractions in bodies that had nothing to redact.
+        if (!$changed) {
+            $inspected = true;
+
+            return $bytes;
+        }
+
+        $encoded = Json::encode($decoded, $bytes, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
         if ($encoded === false) {
             return $bytes;
@@ -1231,6 +1350,29 @@ final readonly class Redactor
         $inspected = true;
 
         return $encoded;
+    }
+
+    /**
+     * Whether every field a body path rule targets in this form body, as
+     * parse_str reads it, holds nothing but the placeholder.
+     */
+    private function formPathsHold(string $bytes): bool
+    {
+        $form = $this->parseForm($bytes);
+
+        if ($form === null) {
+            return false;
+        }
+
+        $holds = true;
+
+        foreach ($this->config->bodyPaths as $path) {
+            $this->collectPath($form, explode('.', $path), function (mixed $leaf) use (&$holds): void {
+                $holds = $holds && $this->isPlaceholder((string) $leaf);
+            });
+        }
+
+        return $holds;
     }
 
     private function isFormType(?string $contentType): bool
@@ -1286,36 +1428,43 @@ final readonly class Redactor
     }
 
     /**
-     * @param array<array-key, mixed> $data
-     * @param list<string>            $segments
+     * Apply one path rule to decoded data, arrays and objects alike.
      *
-     * @return array<array-key, mixed>
+     * @param array<array-key, mixed>|\stdClass $data
+     * @param list<string>                     $segments
+     *
+     * @return ($data is \stdClass ? \stdClass : array<array-key, mixed>)
      */
-    private function redactPath(array $data, array $segments): array
+    private function redactPath(array|\stdClass $data, array $segments, bool &$changed = false): array|\stdClass
     {
         if ($segments === []) {
             return $data;
         }
 
         $segment = array_shift($segments);
-        $keys = $segment === '*' ? array_keys($data) : [$segment];
+        $fields = $data instanceof \stdClass ? get_object_vars($data) : $data;
+        $keys = $segment === '*' ? array_keys($fields) : [$segment];
 
         foreach ($keys as $key) {
-            if (!array_key_exists($key, $data)) {
+            if (!array_key_exists($key, $fields)) {
                 continue;
             }
+
+            $value = $fields[$key];
 
             if ($segments === []) {
-                $value = $data[$key];
-                $data[$key] = $this->replacementFor(is_scalar($value) ? (string) $value : '');
-
+                $new = $this->replacementFor(is_scalar($value) ? (string) $value : '');
+                $changed = $changed || $new !== $value;
+            } elseif (is_array($value) || $value instanceof \stdClass) {
+                $new = $this->redactPath($value, $segments, $changed);
+            } else {
                 continue;
             }
 
-            if (is_array($data[$key])) {
-                /** @var array<array-key, mixed> $child */
-                $child = $data[$key];
-                $data[$key] = $this->redactPath($child, $segments);
+            if ($data instanceof \stdClass) {
+                $data->{$key} = $new;
+            } else {
+                $data[$key] = $new;
             }
         }
 
