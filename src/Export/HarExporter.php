@@ -118,12 +118,24 @@ final readonly class HarExporter
             'bodySize' => $exchange->requestBody->size ?? -1,
         ];
 
-        if ($exchange->requestBody->isPresent()) {
+        $body = $exchange->requestBody->serialisedBytes();
+
+        if ($body !== null) {
+            [$text, $encoding] = $body;
+
             $entry['postData'] = [
                 'mimeType' => $exchange->requestBody->contentType ?? 'application/octet-stream',
-                'text' => (string) $exchange->requestBody->bytes,
+                'text' => $text,
                 'params' => [],
             ];
+
+            // HAR 1.2 gives postData no encoding field, so a body that is not
+            // UTF-8 is carried as base64 and says so, rather than being
+            // written with its bytes replaced.
+            if ($encoding !== null) {
+                $entry['postData']['_encoding'] = $encoding;
+                $entry['postData']['comment'] = 'Body is not valid UTF-8; text is base64-encoded.';
+            }
         }
 
         return $entry;
@@ -157,8 +169,15 @@ final readonly class HarExporter
             'mimeType' => $body->contentType ?? '',
         ];
 
-        if ($body->isPresent()) {
-            $content['text'] = (string) $body->bytes;
+        $serialised = $body->serialisedBytes();
+
+        if ($serialised !== null) {
+            [$content['text'], $encoding] = $serialised;
+
+            // HAR's own field for a body that is not text.
+            if ($encoding !== null) {
+                $content['encoding'] = $encoding;
+            }
         }
 
         if ($body->wasOmitted()) {

@@ -30,6 +30,12 @@ final readonly class CapturedBody implements \JsonSerializable
     public const OMITTED_REDACTED = 'redacted';
     public const OMITTED_DISABLED = 'disabled';
 
+    /**
+     * How `bytes` is written when the body is not valid UTF-8. The same name
+     * and meaning as HAR's `content.encoding`.
+     */
+    public const ENCODING_BASE64 = 'base64';
+
     private function __construct(
         public ?string $bytes,
         public ?int $size,
@@ -155,8 +161,15 @@ final readonly class CapturedBody implements \JsonSerializable
      */
     public static function fromArray(array $data): self
     {
+        $bytes = isset($data['bytes']) ? (string) $data['bytes'] : null;
+
+        if ($bytes !== null && ($data['encoding'] ?? null) === self::ENCODING_BASE64) {
+            $bytes = base64_decode($bytes, true);
+            $bytes = $bytes === false ? null : $bytes;
+        }
+
         return new self(
-            bytes: isset($data['bytes']) ? (string) $data['bytes'] : null,
+            bytes: $bytes,
             size: isset($data['size']) ? (int) $data['size'] : null,
             sha256: isset($data['sha256']) ? (string) $data['sha256'] : null,
             contentType: isset($data['content_type']) ? (string) $data['content_type'] : null,
@@ -170,13 +183,83 @@ final readonly class CapturedBody implements \JsonSerializable
      */
     public function jsonSerialize(): array
     {
+        [$bytes, $encoding] = $this->serialisedBytes() ?? [null, null];
+
         return array_filter([
-            'bytes' => $this->bytes,
+            'bytes' => $bytes,
+            'encoding' => $encoding,
             'size' => $this->size,
             'sha256' => $this->sha256,
             'content_type' => $this->contentType,
             'truncated' => $this->truncated ?: null,
             'omitted_reason' => $this->omittedReason,
         ], static fn (mixed $v): bool => $v !== null);
+    }
+
+    /**
+     * Whether the stored bytes are valid UTF-8 text.
+     */
+    public function isUtf8(): bool
+    {
+        return $this->bytes === null || preg_match('//u', $this->bytes) === 1;
+    }
+
+    /**
+     * The bytes as they are written to JSON, and the encoding they are
+     * written in: null for text, `base64` otherwise. Null when there are no
+     * bytes.
+     *
+     * JSON strings are Unicode, so a body in Latin-1, Shift JIS or any other
+     * non-UTF-8 charset cannot be written as one without changing it. It used
+     * to be written with every invalid byte replaced by U+FFFD, beside a
+     * sha256 that still claimed the original — a record that was wrong and
+     * said it was right. Base64 is lossless, so the digest stays true, and it
+     * is the encoding HAR already defines for exactly this.
+     *
+     * A truncated prefix cut in the middle of a multibyte character is still
+     * text. The partial character is dropped instead, so it stays readable;
+     * it remains a prefix, and it is still marked truncated.
+     *
+     * @return array{string, string|null}|null
+     */
+    public function serialisedBytes(): ?array
+    {
+        if ($this->bytes === null) {
+            return null;
+        }
+
+        if ($this->isUtf8()) {
+            return [$this->bytes, null];
+        }
+
+        if ($this->truncated) {
+            $text = self::withoutPartialCharacter($this->bytes);
+
+            if ($text !== $this->bytes && preg_match('//u', $text) === 1) {
+                return [$text, null];
+            }
+        }
+
+        return [base64_encode($this->bytes), self::ENCODING_BASE64];
+    }
+
+    /**
+     * Drop an incomplete UTF-8 sequence from the end of a string.
+     */
+    private static function withoutPartialCharacter(string $bytes): string
+    {
+        $length = strlen($bytes);
+
+        for ($back = 1; $back <= min(3, $length); ++$back) {
+            $byte = ord($bytes[$length - $back]);
+
+            if (($byte & 0xc0) === 0x80) {
+                continue;
+            }
+
+            return $byte >= 0xc0 ? substr($bytes, 0, $length - $back) : $bytes;
+        }
+
+        return $bytes;
     }
 }

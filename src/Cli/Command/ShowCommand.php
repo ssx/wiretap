@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Ssx\Wiretap\Cli\Command;
 
+use Ssx\Wiretap\CapturedBody;
 use Ssx\Wiretap\Cli\Input;
 use Ssx\Wiretap\Cli\Output;
 use Ssx\Wiretap\Exchange;
@@ -102,16 +103,29 @@ final class ShowCommand extends AbstractCommand
         $this->renderHeaders($exchange, true);
         $o->line();
         $o->line($raw ? $this->safe((string) $exchange->requestBody->bytes) : $this->prettyBody($exchange, true));
+        $this->noteEncoding($exchange->requestBody);
 
         $o->line();
         $o->line($o->cyan('RESPONSE'));
         $this->renderHeaders($exchange, false);
         $o->line();
         $o->line($raw ? $this->safe((string) $exchange->responseBody->bytes) : $this->prettyBody($exchange, false));
+        $this->noteEncoding($exchange->responseBody);
         $o->line();
         $correlation = $this->safe($exchange->correlationId);
         $o->line($o->dim('  correlation ' . $correlation . '  ·  wiretap trace ' . $correlation));
         $o->line();
+    }
+
+    /**
+     * Say so when a body is not UTF-8, so its escaped bytes are not read as
+     * the text the server sent.
+     */
+    private function noteEncoding(CapturedBody $body): void
+    {
+        if (!$body->isUtf8()) {
+            $this->output->line($this->output->dim('  (not valid UTF-8; bytes above 0x7f are shown as \\xNN)'));
+        }
     }
 
     private function renderHeaders(Exchange $exchange, bool $request): void
@@ -183,12 +197,23 @@ final class ShowCommand extends AbstractCommand
             }
         }
 
-        if ($exchange->requestBody->isPresent()) {
+        $binary = $exchange->requestBody->isPresent() && !$exchange->requestBody->isUtf8();
+
+        if ($binary) {
+            // Bytes that are not UTF-8 cannot be printed as an argument
+            // without the terminal escaping changing them, so they are piped
+            // in from base64 instead.
+            $parts[] = '--data-binary @-';
+        } elseif ($exchange->requestBody->isPresent()) {
             $parts[] = '--data ' . escapeshellarg((string) $exchange->requestBody->bytes);
         }
 
         $parts[] = escapeshellarg($exchange->uri);
 
-        return implode(" \\\n  ", $parts);
+        $command = implode(" \\\n  ", $parts);
+
+        return $binary
+            ? 'printf %s ' . escapeshellarg(base64_encode((string) $exchange->requestBody->bytes)) . " | base64 --decode | \\\n" . $command
+            : $command;
     }
 }

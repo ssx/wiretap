@@ -102,6 +102,8 @@ final class Application
         $o->line('  --method=METHOD    Only this HTTP method');
         $o->line('  --status=CODE      Exact status, or a class such as 5xx');
         $o->line('  --failed           Transport errors and 4xx/5xx only');
+        $o->line('  --since=30m        Only records newer than this (or a Unix timestamp)');
+        $o->line('  --until=2h         Only records older than this (or a Unix timestamp)');
         $o->line('  --limit=N          Maximum results (default 20)');
         $o->line();
         $o->line($o->bold('EXAMPLES'));

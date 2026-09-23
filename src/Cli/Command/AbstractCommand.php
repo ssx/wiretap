@@ -40,10 +40,30 @@ abstract class AbstractCommand
             statusClass: $statusClass,
             failedOnly: $input->flag('failed'),
             correlationId: $input->option('correlation'),
-            since: $this->relativeTime($input->option('since')),
+            since: $this->window($input, 'since'),
+            until: $this->window($input, 'until'),
             limit: $input->integer('limit', $defaultLimit),
             offset: $input->integer('offset', 0),
         );
+    }
+
+    /**
+     * A --since or --until bound, refusing one that cannot be read.
+     *
+     * An unreadable bound used to be dropped, and `--until` was never read at
+     * all, so `export --until=...` wrote every record there was: more than
+     * was asked for, from a command whose output is meant to be shared.
+     */
+    private function window(Input $input, string $option): ?float
+    {
+        $value = $input->option($option);
+        $time = $this->relativeTime($value);
+
+        if ($value !== null && $value !== '' && $time === null) {
+            throw new \InvalidArgumentException("Could not read --{$option}={$value}. Try 30m, 2h, 7d or a Unix timestamp.");
+        }
+
+        return $time;
     }
 
     /**
