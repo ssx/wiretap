@@ -127,9 +127,17 @@ final readonly class Pattern
     public function matches(string $url): bool
     {
         if ($this->regex !== null) {
+            $canonical = self::canonicalUrl($url);
+
+            // A host that cannot be read one way only is blocked by host
+            // rules; a regex rule treats it the same, so the two kinds agree.
+            if ($canonical === false) {
+                return true;
+            }
+
             // Tried against the URL as written and as curl will read it, so a
             // rule for api.stripe.com also stops api.%73tripe.com.
-            foreach (array_unique([$url, self::canonicalUrl($url) ?? $url]) as $candidate) {
+            foreach (array_unique([$url, $canonical ?? $url]) as $candidate) {
                 $result = preg_match($this->regex, $candidate);
 
                 // preg_match returns false on a runtime failure — invalid
@@ -144,14 +152,7 @@ final readonly class Pattern
             return false;
         }
 
-        $parts = parse_url($url);
-
-        // curl accepts a scheme-less URL and defaults to http, so
-        // `api.stripe.com/v1/charges` is a real request that parse_url reads
-        // as a path with no host — and the gate returned false for it.
-        if (is_array($parts) && !isset($parts['host']) && !str_contains($url, '://')) {
-            $parts = parse_url('http://' . ltrim($url, '/'));
-        }
+        $parts = self::parseUrl($url);
 
         if ($parts === false || !isset($parts['host'])) {
             // Unreadable. A rule exists to stop this traffic, so an address we
@@ -159,7 +160,7 @@ final readonly class Pattern
             return true;
         }
 
-        $host = self::normaliseHost($parts['host']);
+        $host = self::readHost($url, (string) $parts['host']);
 
         // A host that cannot be read one way only — still percent-encoded
         // after decoding, or numeric but not a valid address — may reach the
@@ -177,7 +178,7 @@ final readonly class Pattern
         }
 
         return str_starts_with(
-            self::normalisePath($parts['path'] ?? '/'),
+            self::normalisePath((string) ($parts['path'] ?? '/')),
             self::normalisePath($this->pathPrefix),
         );
     }
@@ -230,20 +231,60 @@ final readonly class Pattern
     }
 
     /**
-     * The URL with its host replaced by the canonical form, for regex rules.
+     * parse_url, reading a scheme-less URL the way curl does.
+     *
+     * curl accepts a scheme-less URL and defaults to http, so
+     * `api.stripe.com/v1/charges` is a real request that parse_url reads as a
+     * path with no host — and the gate returned false for it.
+     *
+     * @return array<string, int|string>|false
      */
-    private static function canonicalUrl(string $url): ?string
+    private static function parseUrl(string $url): array|false
     {
         $parts = parse_url($url);
+
+        if (is_array($parts) && !isset($parts['host']) && !str_contains($url, '://')) {
+            $parts = parse_url('http://' . ltrim($url, '/'));
+        }
+
+        return $parts;
+    }
+
+    /**
+     * The canonical host of a parsed URL, or null when it is ambiguous.
+     *
+     * parse_url is not a faithful reader of non-ASCII hosts: on macOS it
+     * replaces bytes 0x80-0x9f with `_`, so `127。0。0。1` came back as a
+     * different string from the one curl resolves. If the host parse_url
+     * returned is not literally present in the URL, the gate is looking at
+     * a host that is not the one being connected to.
+     */
+    private static function readHost(string $url, string $parsedHost): ?string
+    {
+        if (preg_match('/[\x80-\xff]/', $url) === 1 && !str_contains($url, $parsedHost)) {
+            return null;
+        }
+
+        return self::normaliseHost($parsedHost);
+    }
+
+    /**
+     * The URL with its host replaced by the canonical form, for regex rules:
+     * null when there is no host to canonicalise, false when the host is
+     * ambiguous.
+     */
+    private static function canonicalUrl(string $url): string|false|null
+    {
+        $parts = self::parseUrl($url);
 
         if (!is_array($parts) || !isset($parts['host'])) {
             return null;
         }
 
-        $host = self::normaliseHost($parts['host']);
+        $host = self::readHost($url, (string) $parts['host']);
 
         if ($host === null) {
-            return null;
+            return false;
         }
 
         $scheme = isset($parts['scheme']) ? $parts['scheme'] . '://' : '//';
@@ -325,11 +366,27 @@ final readonly class Pattern
             return self::normaliseIpv4($host);
         }
 
-        if (!preg_match('/^[\x20-\x7f]*$/', $host) && function_exists('idn_to_ascii')) {
+        if (preg_match('/^[\x20-\x7f]*$/', $host) !== 1) {
+            // A non-ASCII name is resolved through IDNA. Without it, or if it
+            // rejects the name, there is no telling what curl will connect to.
+            if (!function_exists('idn_to_ascii')) {
+                return null;
+            }
+
             $ascii = idn_to_ascii($host, IDNA_DEFAULT, INTL_IDNA_VARIANT_UTS46);
 
-            if (is_string($ascii) && $ascii !== '') {
-                $host = $ascii;
+            if (!is_string($ascii) || $ascii === '') {
+                return null;
+            }
+
+            $host = rtrim(strtolower($ascii), '.');
+
+            // Fullwidth digits and ideographic full stops map to ASCII ones,
+            // so `２130706433` and `127。0。0。1` reach 127.0.0.1 — but only
+            // where the resolver agrees on how to read the result, and they
+            // do not all agree. Not canonicalised; blocked.
+            if (self::looksNumeric($host)) {
+                return null;
             }
         }
 

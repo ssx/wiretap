@@ -93,6 +93,33 @@ describe('ip literals spelled the way curl still accepts', function (): void {
     ]);
 });
 
+describe('hosts that become numeric through IDNA', function (): void {
+    it('blocks a host whose unicode digits or dots map to an address', function (string $url): void {
+        // idn_to_ascii maps a fullwidth 2 to 2 and 。 to a dot, and curl
+        // built with IDN support connects to the result. The check for a
+        // numeric host ran before that mapping, so it saw a name.
+        expect((new Blocklist([PresetBlocklistProvider::all()]))->blocks($url))->toBeTrue();
+    })->with([
+        'fullwidth digit, encoded' => 'http://%EF%BC%92852039166/latest/meta-data/',
+        'fullwidth digit' => "http://\u{FF12}852039166/latest/meta-data/",
+        'ideographic full stops, encoded' => 'http://0251%E3%80%820376%E3%80%820251%E3%80%820376/latest/meta-data/',
+        'ideographic full stops' => "http://169\u{3002}254\u{3002}169\u{3002}254/latest/meta-data/",
+    ]);
+
+    it('rejects a rule that is only numeric once mapped', function (): void {
+        $blocklist = new Blocklist([new ArrayBlocklistProvider(["\u{FF12}\u{FF18}\u{FF15}\u{FF12}\u{FF10}\u{FF13}\u{FF19}\u{FF11}\u{FF16}\u{FF16}"])]);
+
+        expect($blocklist->errors())->toHaveCount(1);
+    });
+
+    it('still matches an ordinary unicode name', function (): void {
+        $pattern = Pattern::compile('bücher.example');
+
+        expect($pattern->matches('https://xn--bcher-kva.example/'))->toBeTrue()
+            ->and($pattern->matches('https://example.com/'))->toBeFalse();
+    });
+});
+
 describe('percent-encoded hosts', function (): void {
     it('decodes the host before matching, the way curl does', function (string $url): void {
         expect((new Blocklist([new PresetBlocklistProvider()]))->blocks($url))->toBeTrue();
@@ -113,6 +140,14 @@ describe('percent-encoded hosts', function (): void {
 
         expect($pattern->matches('https://api.%73tripe.com/v1'))->toBeTrue()
             ->and($pattern->matches('https://api.example.com/v1'))->toBeFalse();
+    });
+
+    it('decodes a scheme-less url for regex rules too', function (): void {
+        expect(Pattern::compile('~api\.stripe\.com~')->matches('api.%73tripe.com/v1/charges'))->toBeTrue();
+    });
+
+    it('blocks an ambiguous host under a regex rule as a host rule does', function (): void {
+        expect(Pattern::compile('~^https://api\.stripe\.com/~')->matches('https://api.%2573tripe.com/'))->toBeTrue();
     });
 });
 
