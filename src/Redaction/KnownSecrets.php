@@ -38,8 +38,34 @@ final class KnownSecrets
      */
     private array $protected = [];
 
-    public function __construct(private readonly int $minLength = 8)
+    /**
+     * @param string|null $replacement The redactor's placeholder. A value
+     *        made only of placeholders is never learned: a URL another layer
+     *        already redacted taught "[REDACTED]" as a secret, and the
+     *        record's own encoded placeholders were then rewritten.
+     */
+    public function __construct(private readonly int $minLength = 8, private readonly ?string $replacement = null)
     {
+    }
+
+    private function isPlaceholder(string $value): bool
+    {
+        if ($this->replacement === null || $this->replacement === '') {
+            return false;
+        }
+
+        // `[REDACTED]`, or the hash-hint form `[REDACTED:0123abcd]`.
+        $placeholder = str_ends_with($this->replacement, ']')
+            ? preg_quote(rtrim($this->replacement, ']'), '/') . '(?::[0-9a-f]{8})?\\]'
+            : preg_quote($this->replacement, '/');
+
+        foreach ([$value, rawurldecode($value), urldecode($value)] as $candidate) {
+            if (preg_match('/^(?:\\s*' . $placeholder . ')+\\s*$/', $candidate) === 1) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -58,7 +84,7 @@ final class KnownSecrets
     {
         $value = trim($value);
 
-        if (strlen($value) < $this->minLength || isset($this->protected[$value])) {
+        if (strlen($value) < $this->minLength || isset($this->protected[$value]) || $this->isPlaceholder($value)) {
             return;
         }
 
