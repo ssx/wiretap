@@ -296,6 +296,11 @@ final class Wiretap
                 new EnvBlocklistProvider(),
             ]),
             redactor: new Redactor(new RedactionConfig(
+                // On unless explicitly and unmistakably switched off. This
+                // is the one setting whose typo must fail safe: reading
+                // WIRETAP_REDACT=flase as "off" would store credentials in
+                // plaintext because of a spelling mistake.
+                enabled: self::protectiveFromEnv('WIRETAP_REDACT'),
                 maxBodyBytes: self::intFromEnv('WIRETAP_BODY_LIMIT', 65536),
             )),
             sampler: new Sampler(
@@ -309,6 +314,23 @@ final class Wiretap
             ),
             enabled: $enabled,
         );
+    }
+
+    /**
+     * Read a protective switch from the environment: on unless it is off.
+     *
+     * Only a recognised false value turns it off: false, 0, off or no, in any
+     * case and with surrounding whitespace. Unset, empty, a typo or anything
+     * else leaves it on. FILTER_VALIDATE_BOOL is the wrong tool here, because
+     * it reads every unrecognised value as false. This matches the Laravel
+     * bridge's handling of its own protective settings.
+     */
+    private static function protectiveFromEnv(string $name): bool
+    {
+        $value = getenv($name);
+
+        return !(is_string($value)
+            && in_array(strtolower(trim($value)), ['false', '0', 'off', 'no'], true));
     }
 
     /**
