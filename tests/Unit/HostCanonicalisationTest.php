@@ -67,6 +67,17 @@ describe('ip literals spelled the way curl still accepts', function (): void {
             ->and($pattern->matches('http://[fd00:ec2::1]/'))->toBeFalse();
     });
 
+    it('reads a name that starts with a digit as a name', function (): void {
+        // `3ds` is a hostname. Taking it for a malformed number made the rule
+        // fail to compile, and a host the operator had blocked was captured.
+        $blocklist = new Blocklist([new ArrayBlocklistProvider(['3ds', '1e100.net'])]);
+
+        expect($blocklist->blocks('http://3ds/payments'))->toBeTrue()
+            ->and($blocklist->blocks('https://1e100.net/'))->toBeTrue()
+            ->and($blocklist->blocks('https://3ds.example.com/'))->toBeFalse()
+            ->and($blocklist->errors())->toBe([]);
+    });
+
     it('fails closed on an address that is numeric but not valid', function (string $url): void {
         // curl rejects or reinterprets these; either way the gate cannot say
         // with confidence which host they reach, so a rule that exists to stop

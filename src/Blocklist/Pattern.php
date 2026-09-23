@@ -348,7 +348,9 @@ final readonly class Pattern
     private static function looksNumeric(string $host): bool
     {
         foreach (explode('.', $host) as $part) {
-            if (preg_match('/^(0x[0-9a-z]*|[0-9][0-9a-z]*)$/', $part) !== 1) {
+            // Digits only, or 0x and hex. `3ds` or `1e100` is a name that
+            // happens to start with a digit, and curl resolves it as one.
+            if (preg_match('/^(0x[0-9a-f]*|[0-9]+)$/', $part) !== 1) {
                 return false;
             }
         }
