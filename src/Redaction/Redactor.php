@@ -836,8 +836,12 @@ final readonly class Redactor
      */
     public function redactBody(CapturedBody $body, ?KnownSecrets $known = null): CapturedBody
     {
+        // A body that is not stored keeps no raw digest of itself, whoever
+        // omitted it. Next to nothing, a SHA-256 of a four-digit PIN is the
+        // PIN: ten thousand guesses recover it. The truncated-body rule
+        // applies for the same reason — an HMAC under the salt, or nothing.
         if (!$body->isPresent()) {
-            return $body;
+            return $body->sha256 === null ? $body : $body->withDigest($this->digestFor($body->sha256));
         }
 
         // Layer 1.
@@ -846,7 +850,7 @@ final readonly class Redactor
                 CapturedBody::OMITTED_BINARY,
                 $body->size,
                 $body->contentType,
-                $body->sha256,
+                $this->digestFor($body->sha256),
             );
         }
 
