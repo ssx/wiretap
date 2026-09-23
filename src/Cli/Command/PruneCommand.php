@@ -17,8 +17,12 @@ final class PruneCommand extends AbstractCommand
 {
     public function handle(Input $input): int
     {
-        $window = $input->option('older-than', '7d');
-        $cutoff = $this->relativeTime($window);
+        $window = (string) $input->option('older-than', '7d');
+
+        // A retention window needs a unit. A bare number was read as a Unix
+        // timestamp, so `--older-than=7` meant "before 1970" and deleted
+        // nothing while reporting success.
+        $cutoff = is_numeric(trim($window)) ? null : $this->relativeTime($window);
 
         if ($cutoff === null) {
             $this->output->line($this->output->red("Could not read '{$window}'. Try --older-than=7d"));
