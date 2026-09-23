@@ -126,6 +126,25 @@ final class KnownSecrets
     }
 
     /**
+     * Remember every value in a request `Cookie` header.
+     *
+     * Unlike Set-Cookie, a request Cookie is nothing but pairs:
+     * `theme=light; session=abc`. Reading it like Set-Cookie learned the
+     * first value and took the rest for attributes, so the session cookie
+     * was stored in plaintext wherever the API echoed it back.
+     */
+    public function rememberRequestCookies(string $headerValue): void
+    {
+        foreach (explode(';', $headerValue) as $pair) {
+            $parts = explode('=', trim($pair), 2);
+
+            if (count($parts) === 2) {
+                $this->remember(trim($parts[1], " \t\"'"));
+            }
+        }
+    }
+
+    /**
      * @return list<string>
      */
     private function encodingsOf(string $value): array
