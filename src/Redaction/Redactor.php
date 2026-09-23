@@ -9,6 +9,7 @@ use Ssx\Wiretap\Exchange;
 use Ssx\Wiretap\Headers;
 use Ssx\Wiretap\TransferError;
 use Ssx\Wiretap\Support\Json;
+use Ssx\Wiretap\Support\Multipart;
 use Ssx\Wiretap\Support\QueryString;
 use Ssx\Wiretap\Support\Regex;
 
@@ -231,6 +232,16 @@ final readonly class Redactor
     private function learnBodyPaths(CapturedBody $body, KnownSecrets $known): void
     {
         if ($this->config->bodyPaths === [] || !$body->isPresent()) {
+            return;
+        }
+
+        if ($this->isMultipartType($body->contentType)) {
+            foreach (Multipart::parse((string) $body->bytes, $body->contentType)->parts ?? [] as $part) {
+                if (!$this->isFilePart($part) && $this->pathTargets($this->multipartNameSegments($part['name']))) {
+                    $known->remember($part['content']);
+                }
+            }
+
             return;
         }
 
@@ -958,6 +969,10 @@ final readonly class Redactor
             );
         }
 
+        if ($this->isMultipartType($body->contentType)) {
+            return $this->redactMultipart($body, $known);
+        }
+
         $bytes = (string) $body->bytes;
 
         // Layer 4, then 5, then the echoed-value sweep.
@@ -1377,6 +1392,145 @@ final readonly class Redactor
         }
 
         return $holds;
+    }
+
+    private function isMultipartType(?string $contentType): bool
+    {
+        return strtolower(trim(explode(';', $contentType ?? '')[0])) === 'multipart/form-data';
+    }
+
+    /**
+     * Redact a multipart/form-data body part by part.
+     *
+     * Text parts are treated as the form fields they are: body path rules by
+     * part name, the detectors, the echoed-secret sweep, URL parameters and
+     * the safety net. File parts — a filename, or a type that is not text —
+     * are never stored; their content becomes a marker saying what was there.
+     * Only the parts that change are rewritten, so a body with nothing to
+     * redact is stored exactly as sent.
+     *
+     * Anything that cannot be read exactly, and any detector that could not
+     * run, drops the whole body: a field the rules never saw is not stored.
+     */
+    private function redactMultipart(CapturedBody $body, ?KnownSecrets $known): CapturedBody
+    {
+        $bytes = (string) $body->bytes;
+        $multipart = Multipart::parse($bytes, $body->contentType);
+        $omitted = CapturedBody::omitted(
+            CapturedBody::OMITTED_REDACTED,
+            $body->size,
+            $body->contentType,
+            $this->digestFor($body->sha256),
+        );
+
+        if ($multipart === null || ($this->invalidPatterns() !== [] && $this->config->omitUninspectableBodies)) {
+            return $omitted;
+        }
+
+        $contents = [];
+        $texts = [];
+
+        foreach ($multipart->parts as $index => $part) {
+            // A part's own headers carry its name and filename. They are kept
+            // as they are, so anything in them worth redacting drops the body.
+            $headers = $this->applyPatterns($part['headers'], $headersRan);
+
+            if (!$headersRan || $headers !== $part['headers']
+                || ($known !== null && $known->scrub($headers, $this->config->replacement) !== $headers)) {
+                return $omitted;
+            }
+
+            if ($this->isFilePart($part)) {
+                $contents[$index] = sprintf(
+                    '[file part omitted: name=%s, filename=%s, type=%s, size=%d]',
+                    self::markerValue($part['name']),
+                    self::markerValue($part['filename']),
+                    self::markerValue($part['type']),
+                    strlen($part['content']),
+                );
+
+                continue;
+            }
+
+            $content = $part['content'];
+
+            if ($this->pathTargets($this->multipartNameSegments($part['name']))) {
+                $clean = $this->replacementFor($content);
+            } else {
+                $clean = $this->applyPatterns($content, $patternsRan);
+
+                if (!$patternsRan) {
+                    return $omitted;
+                }
+
+                if ($known !== null) {
+                    // Decoded where the part is JSON, so an escaped echo is
+                    // seen; then literally, for everything else.
+                    $clean = $known->scrub($this->scrubDecoded($clean, $known), $this->config->replacement);
+                }
+
+                $clean = $this->redactUrlParamsIn($clean, $known, $urlsRan);
+
+                if (!$urlsRan) {
+                    return $omitted;
+                }
+            }
+
+            $texts[] = $clean;
+
+            if ($clean !== $content) {
+                $contents[$index] = $clean;
+            }
+        }
+
+        // Layer 6, part by part, so a JSON part is scanned decoded.
+        if ($this->config->safetyNet) {
+            foreach ($texts as $text) {
+                if ($this->containsLikelySecret($text)) {
+                    return $omitted;
+                }
+            }
+        }
+
+        $redacted = $contents === [] ? $bytes : $multipart->rebuild($contents);
+        $truncated = $body->truncated;
+
+        if (strlen($redacted) > $this->config->maxBodyBytes) {
+            $redacted = substr($redacted, 0, $this->config->maxBodyBytes);
+            $truncated = true;
+        }
+
+        $result = $body->withBytes($redacted, $truncated);
+
+        return $redacted !== $bytes || $body->truncated
+            ? $result->withDigest($this->digestFor($body->sha256))
+            : $result;
+    }
+
+    /**
+     * @param array{filename: string|null, type: string|null} $part
+     */
+    private function isFilePart(array $part): bool
+    {
+        return $part['filename'] !== null
+            || ($part['type'] !== null && !$this->config->isCapturableType($part['type']));
+    }
+
+    /**
+     * A multipart field name as PHP nests it: `user[pin]` is `user`, `pin`.
+     * Names in a multipart body are not URL-encoded, so the characters
+     * parse_str would decode are escaped first.
+     *
+     * @return list<string>
+     */
+    private function multipartNameSegments(string $name): array
+    {
+        return $this->formNameSegments(strtr($name, ['%' => '%25', '+' => '%2B', '&' => '%26', '=' => '%3D']));
+    }
+
+    private static function markerValue(?string $value): string
+    {
+        return (string) json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
     }
 
     private function isFormType(?string $contentType): bool
