@@ -109,6 +109,39 @@ describe('a multipart/form-data body', function (): void {
         expect((string) (new Redactor())->redactBody(mpBody($bytes))->bytes)->not->toContain('hunter2');
     });
 
+    it('reads the layout each bridge sends', function (string $boundary, string $partHeaders, string $fileHeaders): void {
+        $body = static fn (string $password, string $file): string => "--{$boundary}\r\n"
+            . str_replace('{name}', 'password', $partHeaders) . "\r\n\r\n{$password}\r\n"
+            . "--{$boundary}\r\n"
+            . $fileHeaders . "\r\n\r\n{$file}\r\n"
+            . "--{$boundary}--\r\n";
+        $redactor = new Redactor(new RedactionConfig(bodyPaths: ['password']));
+
+        $result = $redactor->redactBody(mpBody($body('hunter2hunter2', "\x89PNG\r\n\x1a\nBINARY"), 'multipart/form-data; boundary=' . $boundary));
+
+        expect($result->bytes)->toBe($body('[REDACTED]', '[file part omitted: name="avatar", filename="me.png", type="image/png", size=14]'));
+    })->with([
+        // Guzzle's MultipartStream.
+        'guzzle' => [
+            'fce7849ea064a39ba7340ec4ccb2f090a0b90066',
+            "Content-Disposition: form-data; name=\"{name}\"\r\nContent-Length: 14",
+            "Content-Disposition: form-data; name=\"avatar\"; filename=\"me.png\"\r\nContent-Length: 14\r\nContent-Type: image/png",
+        ],
+        // Symfony Mime's FormDataPart.
+        'symfony' => [
+            'aKLW_70J',
+            "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\nContent-Disposition: form-data; name=\"{name}\"",
+            "Content-Type: image/png\r\nContent-Transfer-Encoding: 8bit\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"me.png\"",
+        ],
+        // wiretap-auto's rebuild of an array CURLOPT_POSTFIELDS (text only;
+        // a CURLFile is not rebuilt).
+        'curl array postfields' => [
+            '------------------------wiretapreconstructed00',
+            "Content-Disposition: form-data; name=\"{name}\"",
+            "Content-Disposition: form-data; name=\"avatar\"; filename=\"me.png\"\r\nContent-Type: image/png",
+        ],
+    ]);
+
     it('is omitted whole when it cannot be read', function (string $bytes, string $type): void {
         $result = (new Redactor())->redactBody(mpBody($bytes, $type));
 
