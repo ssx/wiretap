@@ -34,6 +34,13 @@ status and timings are all recorded normally. If you need response bodies from
 a client you own, use the bridge package for it; `ssx/wiretap-auto` is for
 traffic you cannot reach.
 
+Running a bridge and `ssx/wiretap-auto` together records each call once. The
+bridge claims the transfers it records (`Ssx\Wiretap\TransferClaim`) and the
+curl hooks record nothing for a claimed transfer, so the bridge's record, with
+its bodies, is the one you get. This needs `ssx/wiretap-auto` v0.0.8 or later
+together with `ssx/wiretap-guzzle` v0.0.10 or `ssx/wiretap-symfony` v0.0.7 or
+later; if either side is older, each call is recorded twice.
+
 ## ⚠️ This is a debugging tool, not a logging product
 
 Wiretap records complete outbound HTTP requests and responses, including
