@@ -13,36 +13,37 @@ namespace Ssx\Wiretap;
  * no link between the two. The bridge's record is the better one, so the
  * bridge claims the transfer and the hooks stand aside.
  *
- * The claim travels as a curl option on the handle itself, because that is
- * the one thing that reaches the hooks on every hop: Guzzle copies its request
- * options through redirects and retries, and Symfony's retry layer re-issues
- * the same options. It is not a real curl option. ext-curl rejects it with a
- * ValueError, so it must never reach curl: the hooks strip it before curl
- * sees it, and a bridge only sends it once the hooks have said they will.
+ * The claim is a request option set to true: `$options[KEY]` on a Guzzle
+ * request, `$options['extra'][KEY]` on a Symfony one. Request options are
+ * what reaches every hop, because Guzzle copies them through its redirect and
+ * retry middleware and Symfony's retry layer re-issues them. wiretap-auto
+ * reads the option where each client turns a request into a curl handle, and
+ * records nothing for that handle.
  *
- * That is what the honoured flag is for. It is set by wiretap-auto after its
- * hooks are installed and it has proved they strip the option. When the
- * extension is missing, auto is disabled, or auto is not installed at all, it
- * stays false and bridges add nothing, so their curl options are exactly what
- * they would have been without this class.
+ * It is deliberately not a curl option. An unknown key in Guzzle's `curl`
+ * option raises a deprecation from Guzzle 7.12 and will be rejected by 8.0,
+ * and ext-curl throws a ValueError for it. A request option neither client
+ * recognises is ignored by both, and never reaches curl.
+ *
+ * Bridges add it only when the hooks have said they read it: honour() is
+ * called by wiretap-auto once those hooks are installed. Without the
+ * extension, with auto disabled or not installed at all, it stays false and
+ * a bridge's request options are exactly what they would have been without
+ * this class.
  *
  * This class has no behaviour of its own.
  */
 final class TransferClaim
 {
     /**
-     * The option key a bridge adds to a transfer's curl options.
-     *
-     * Negative, because every libcurl option id is a positive offset from one
-     * of the CURLOPTTYPE_* bases, and the only negative option PHP defines
-     * itself is CURLOPT_SAFE_UPLOAD (-1). This is -0x77697265, "wire".
+     * The request option a bridge sets to true on a transfer it records.
      */
-    public const OPTION = -2003398245;
+    public const KEY = 'wiretap_claimed';
 
     private static bool $honoured = false;
 
     /**
-     * Called by the curl hooks once they strip the option. Not for bridges.
+     * Called by the curl hooks once they read the claim. Not for bridges.
      */
     public static function honour(): void
     {
@@ -50,7 +51,7 @@ final class TransferClaim
     }
 
     /**
-     * Whether a bridge may add the option. False means send nothing extra.
+     * Whether a bridge may add the claim. False means add nothing.
      */
     public static function isHonoured(): bool
     {
@@ -59,7 +60,7 @@ final class TransferClaim
 
     /**
      * For tests. Deliberately not called by Wiretap::reset(): the hooks that
-     * strip the option are process-wide and survive a reset, so the flag that
+     * read the claim are process-wide and survive a reset, so the flag that
      * describes them should too.
      */
     public static function reset(): void

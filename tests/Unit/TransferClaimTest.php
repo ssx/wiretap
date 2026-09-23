@@ -23,29 +23,10 @@ it('survives a Wiretap reset, because the hooks it describes do', function (): v
     expect(TransferClaim::isHonoured())->toBeTrue();
 });
 
-it('uses a key no curl option can have', function (): void {
-    expect(TransferClaim::OPTION)->toBeLessThan(-1)
-        ->and(TransferClaim::OPTION)->toBeGreaterThanOrEqual(-2147483648);
-
-    if (!extension_loaded('curl')) {
-        return;
-    }
-
-    $clashes = array_keys(array_filter(
-        get_defined_constants(true)['curl'] ?? [],
-        static fn (mixed $value, string $name): bool => $value === TransferClaim::OPTION && str_starts_with($name, 'CURLOPT_'),
-        ARRAY_FILTER_USE_BOTH,
-    ));
-
-    expect($clashes)->toBe([]);
-});
-
-it('is rejected by curl itself, which is why it must never reach it unhooked', function (): void {
-    if (!extension_loaded('curl')) {
-        $this->markTestSkipped('needs ext-curl');
-    }
-
-    $handle = curl_init();
-
-    expect(fn () => curl_setopt($handle, TransferClaim::OPTION, true))->toThrow(\ValueError::class);
+it('is a request option name, never a curl option', function (): void {
+    // An int key would be read as a curl option: Guzzle deprecates unknown
+    // ones from 7.12 and ext-curl throws for them.
+    expect(TransferClaim::KEY)->toBeString()
+        ->and(is_numeric(TransferClaim::KEY))->toBeFalse()
+        ->and(defined(TransferClaim::class . '::OPTION'))->toBeFalse();
 });
