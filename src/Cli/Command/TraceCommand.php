@@ -33,7 +33,7 @@ final class TraceCommand extends AbstractCommand
         )), false);
 
         if ($exchanges === []) {
-            $this->output->line($this->output->dim("Nothing recorded for correlation {$correlationId}"));
+            $this->output->line($this->output->dim('Nothing recorded for correlation ' . $this->safe($correlationId)));
 
             return 0;
         }
@@ -50,7 +50,7 @@ final class TraceCommand extends AbstractCommand
         $totalUs = array_sum(array_map(static fn ($e): int => $e->timings->total ?? 0, $exchanges));
 
         $o->line();
-        $o->line($o->bold('Correlation ') . $correlationId);
+        $o->line($o->bold('Correlation ') . $this->safe($correlationId));
         $o->line($o->dim(sprintf(
             '  %d calls · %s spent waiting on the network · %s',
             count($exchanges),
@@ -89,7 +89,7 @@ final class TraceCommand extends AbstractCommand
                 $i + 1,
                 $o->dim($bar),
                 $status,
-                str_pad($exchange->method, 6),
+                str_pad($this->safe($exchange->method), 6),
                 $this->formatMs($exchange->timings->total),
                 $this->shortUri($exchange->uri, 44),
             ));

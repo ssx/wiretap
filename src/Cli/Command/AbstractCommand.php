@@ -88,8 +88,18 @@ abstract class AbstractCommand
         return number_format($microseconds / 1000) . 'ms';
     }
 
+    /**
+     * Recorded text, safe to print. See Output::clean().
+     */
+    protected function safe(string $text): string
+    {
+        return Output::clean($text);
+    }
+
     protected function shortUri(string $uri, int $max = 60): string
     {
+        $uri = $this->safe($uri);
+
         return strlen($uri) <= $max ? $uri : substr($uri, 0, $max - 1) . '…';
     }
 
@@ -123,6 +133,8 @@ abstract class AbstractCommand
         if (is_array($decoded)) {
             $text = (string) json_encode($decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         }
+
+        $text = $this->safe($text);
 
         if ($body->truncated) {
             $text .= PHP_EOL . $this->output->dim(sprintf(

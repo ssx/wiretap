@@ -27,6 +27,49 @@ final class Output
         $this->write($text . PHP_EOL);
     }
 
+    /**
+     * Make recorded text safe to print to a terminal.
+     *
+     * Everything shown by list, show and trace came from a server or an
+     * application, and a terminal acts on control sequences wherever they
+     * appear: an OSC 52 sequence in a response header wrote to the operator's
+     * clipboard, and CSI 2J cleared the screen to draw a fake one. C0 controls
+     * (other than newline and tab), DEL and C1 controls are written as
+     * visible escapes instead. Text that is not valid UTF-8 has every byte
+     * above 0x7f escaped, since a terminal not in UTF-8 mode reads 0x9b alone
+     * as CSI.
+     */
+    public static function clean(string $text): string
+    {
+        $pattern = preg_match('//u', $text) === 1
+            ? '/[\x00-\x08\x0b-\x1f\x7f]|\xc2[\x80-\x9f]/'
+            : '/[\x00-\x08\x0b-\x1f\x7f-\xff]/';
+
+        return preg_replace_callback(
+            $pattern,
+            static fn (array $m): string => strlen($m[0]) === 2
+                ? sprintf('\\u%04x', ord($m[0][1]))
+                : sprintf('\\x%02x', ord($m[0])),
+            $text,
+        ) ?? (preg_replace('/[^\x20-\x7e\n\t]/', '?', $text) ?? '');
+    }
+
+    /**
+     * Escape C1 controls in JSON output as \u0080-\u009f.
+     *
+     * JSON_UNESCAPED_UNICODE writes them as raw UTF-8, which some terminals
+     * act on. The escaped form decodes to the same string, so the document
+     * is unchanged; C0 controls are already escaped by json_encode.
+     */
+    public static function cleanJson(string $json): string
+    {
+        return preg_replace_callback(
+            '/\xc2([\x80-\x9f])/',
+            static fn (array $m): string => sprintf('\\u%04x', ord($m[1])),
+            $json,
+        ) ?? $json;
+    }
+
     public function dim(string $text): string
     {
         return $this->decorate($text, '2');
