@@ -69,6 +69,10 @@ final readonly class RedactionConfig
      * the pipeline, because it solves memory, disk and most accidental
      * exposure at once.
      *
+     * multipart/form-data is read part by part: text fields are kept and
+     * redacted like any form field, and file parts are replaced by a marker
+     * and never stored.
+     *
      * @var list<string>
      */
     public const DEFAULT_CAPTURABLE_TYPES = [
@@ -76,6 +80,7 @@ final readonly class RedactionConfig
         'application/xml',
         'text/xml',
         'application/x-www-form-urlencoded',
+        'multipart/form-data',
         'application/graphql',
         'application/x-ndjson',
         'text/',
