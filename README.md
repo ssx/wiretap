@@ -304,6 +304,14 @@ Four pattern forms are supported:
 | `api.foo.com/v2/payments*` | host plus path prefix | `api.foo.com/v2/orders` |
 | `~^https://api\.foo\.com/v2/~` | full-URL regex, `~`-delimited | — |
 
+Hosts are compared the way curl will connect to them, on both sides of the
+rule: `2852039166`, `0xa9fea9fe`, `[::ffff:a9fe:a9fe]` and the NAT64 forms
+`[64:ff9b::a9fe:a9fe]` (RFC 6052's well-known prefix) and
+`[64:ff9b:1:a9fe:a9:fe00::]` (RFC 8215's local-use prefix) are all
+169.254.169.254. A network-specific NAT64 prefix is chosen by whoever runs the
+translator and cannot be known here; on such a network, add a rule for the
+address in that prefix's spelling as well.
+
 Matching is never substring-based against the raw URL. Providers are merged,
 never intersected — registering another provider can only ever block more
 traffic, never less.

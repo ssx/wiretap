@@ -142,7 +142,7 @@ describe('body redaction', function (): void {
             ->and($result->bytes)->toContain('100');
     });
 
-    it('omits a binary body, keeping its size and hash', function (): void {
+    it('omits a binary body, keeping its size but not its raw hash', function (): void {
         $result = (new Redactor())->redactBody(CapturedBody::captured(
             "\x89PNG\r\n\x1a\n binary payload",
             size: 4096,
@@ -153,7 +153,8 @@ describe('body redaction', function (): void {
         expect($result->isPresent())->toBeFalse()
             ->and($result->omittedReason)->toBe(CapturedBody::OMITTED_BINARY)
             ->and($result->size)->toBe(4096)
-            ->and($result->sha256)->toBe('deadbeef');
+            // Without a salt there is no digest that is safe to keep.
+            ->and($result->sha256)->toBeNull();
     });
 
     it('drops the whole body when the safety net still finds a secret', function (): void {

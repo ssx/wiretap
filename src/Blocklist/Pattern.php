@@ -473,6 +473,38 @@ final readonly class Pattern
         return is_string($dotted) ? $dotted : null;
     }
 
+    /**
+     * The IPv4 address a v6 address reaches, as four bytes, where the prefix
+     * says so.
+     *
+     * - `::ffff:0:0/96`, IPv4-mapped: the address over a v6 socket.
+     * - `64:ff9b::/96`, RFC 6052's well-known NAT64 prefix: a DNS64/NAT64
+     *   network translates it to the IPv4 address in the last 32 bits, so
+     *   `[64:ff9b::a9fe:a9fe]` reaches the metadata endpoint.
+     * - `64:ff9b:1::/48`, RFC 8215's local-use NAT64 prefix, laid out as RFC
+     *   6052 does for a /48: IPv4 bits 0-15 at bits 48-63, the reserved `u`
+     *   octet at 64-71, and IPv4 bits 16-31 at 72-87. The suffix is not
+     *   checked, since a translator reaching the address regardless is the
+     *   case that matters here.
+     *
+     * A network-specific NAT64 prefix is chosen by whoever runs the
+     * translator and cannot be known from here, so it is not mapped. Block it
+     * by writing the rule in that network's own spelling.
+     */
+    private static function embeddedIpv4(string $binary): ?string
+    {
+        if (str_starts_with($binary, str_repeat("\0", 10) . "\xff\xff")
+            || str_starts_with($binary, "\x00\x64\xff\x9b" . str_repeat("\0", 8))) {
+            return substr($binary, 12, 4);
+        }
+
+        if (str_starts_with($binary, "\x00\x64\xff\x9b\x00\x01")) {
+            return substr($binary, 6, 2) . substr($binary, 9, 2);
+        }
+
+        return null;
+    }
+
     private static function normaliseIpv6(string $host): ?string
     {
         // A zone id names an interface, not a different address.
@@ -488,11 +520,12 @@ final readonly class Pattern
             return null;
         }
 
-        // ::ffff:a.b.c.d is the IPv4 address, reached over a v6 socket.
-        if (str_starts_with($binary, str_repeat("\0", 10) . "\xff\xff")) {
-            $v4 = inet_ntop(substr($binary, 12));
+        $v4 = self::embeddedIpv4($binary);
 
-            return is_string($v4) ? $v4 : null;
+        if ($v4 !== null) {
+            $dotted = inet_ntop($v4);
+
+            return is_string($dotted) ? $dotted : null;
         }
 
         $text = inet_ntop($binary);
